@@ -19,6 +19,8 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.concurrent.Executors
 import java.util.Locale
+import javax.crypto.Mac
+import javax.crypto.spec.SecretKeySpec
 import java.util.concurrent.TimeUnit
 
 class FriendsBot(
@@ -40,6 +42,9 @@ class FriendsBot(
 
     /** Админ нажал "Ответить": его следующее сообщение уйдёт этому пользователю. */
     private val replyingTo = mutableMapOf<Long, Long>()
+
+    /** Пришёл по общей ссылке и подал заявку: следующий текст - кто дал ссылку. */
+    private val awaitingReferrer = mutableSetOf<Long>()
 
     private val botUsername by lazy { telegram.botUsername() }
 
@@ -85,8 +90,9 @@ class FriendsBot(
         val admin = config.isAdmin(from.id)
 
         if (!admin && !allowed(friend)) {
-            if (message.command == "/start" && message.argument == inviteCode()) {
-                store.setInvited(friend.id, now())
+            val invite = if (message.command == "/start") parseInvite(message.argument) else null
+            if (invite != null) {
+                store.setInvited(friend.id, now(), invite.by)
                 showHome(chatId, store.get(friend.id)!!)
             } else {
                 telegram.sendMessage(chatId, Texts.CLOSED)
@@ -139,7 +145,47 @@ class FriendsBot(
 
     private fun inviteText() = "🔗 <b>Ссылка-приглашение</b>\n<code>${inviteLink()}</code>\n\n" +
         "Ссылка одна и не меняется. Кто откроет её, сможет отправить заявку, а доступ всё равно выдаёте вы. " +
-        "Остальным бот ответит, что он закрытый."
+        "Остальным бот ответит, что он закрытый.\n\n" +
+        "🤝 У каждого друга с доступом есть своя ссылка (кнопка «Пригласить друга» в меню). " +
+        "Кто придёт по ней, у того в заявке будет видно, от кого он."
+
+    /**
+     * Личная ссылка друга: f<id>x<подпись>. Подпись - HMAC от id на общем коде, чтобы нельзя было
+     * подставить чужой id; заводить отдельные коды в базе не нужно.
+     */
+    private fun personalCode(friendId: Long): String = "f${friendId}x${signature(friendId)}"
+
+    private fun signature(friendId: Long): String {
+        val mac = Mac.getInstance("HmacSHA256")
+        mac.init(SecretKeySpec(inviteCode().toByteArray(), "HmacSHA256"))
+        return mac.doFinal(friendId.toString().toByteArray()).take(5).joinToString("") { "%02x".format(it) }
+    }
+
+    private class Invite(val by: Long?)
+
+    /** Код из /start: общий -> Invite(null), личный рабочий -> Invite(id пригласившего), иначе null. */
+    private fun parseInvite(code: String): Invite? {
+        if (code == inviteCode()) return Invite(null)
+        val match = PERSONAL_CODE.matchEntire(code) ?: return null
+        val by = match.groupValues[1].toLongOrNull() ?: return null
+        if (match.groupValues[2] != signature(by)) return null
+        val referrer = store.get(by) ?: return null
+        // приглашать может только тот, у кого есть доступ (или админ)
+        return if (referrer.status == Status.APPROVED || config.isAdmin(by)) Invite(by) else null
+    }
+
+    private fun showMyInvite(friend: Friend, screen: Screen) {
+        val link = if (config.isAdmin(friend.id)) inviteLink() else "https://t.me/$botUsername?start=${personalCode(friend.id)}"
+        screen.show(Texts.MY_INVITE.replace("{link}", link), backKeyboard())
+    }
+
+    /** Как человек показывается в заявке и карточке: откуда пришёл. */
+    private fun referrerText(friend: Friend): String = when {
+        friend.invitedBy != null -> "от ${store.get(friend.invitedBy)?.title?.escapeHtml() ?: friend.invitedBy.toString()}"
+        friend.referrerNote != null -> "по общей ссылке, говорит, что от «${friend.referrerNote.escapeHtml()}»"
+        friend.invitedAt != null -> "по общей ссылке"
+        else -> "неизвестно (пришёл до приглашений)"
+    }
 
     // ---------- Переписка с админом ----------
 
@@ -173,6 +219,13 @@ class FriendsBot(
 
     /** Обычный текст: ответ на вопрос опроса, если он сейчас ждёт текста. */
     private fun onText(chatId: Long, friend: Friend, text: String) {
+        if (awaitingReferrer.remove(friend.id)) {
+            val note = text.trim().take(100)
+            store.setReferrerNote(friend.id, note)
+            notifyAdmins("🤝 ${friend.title.escapeHtml()} говорит, что ссылку дал(а): «${note.escapeHtml()}»", emptyList())
+            telegram.sendMessage(chatId, Texts.REFERRER_THANKS)
+            return
+        }
         when (store.survey(friend.id)?.step) {
             SurveyStep.PREV_VPN_NAME -> {
                 store.answerSurvey(friend.id, "prev_vpn_name", text.trim().take(100), SurveyStep.DIFFICULTY, now())
@@ -260,6 +313,11 @@ class FriendsBot(
             ))
             "apk" -> sendApp(chatId, App.ANDROID_APK, Texts.ANDROID_APK, installedKeyboard())
             "installed" -> installed(chatId, store.get(friend.id)!!, screen)
+            "invite_me" -> if (friend.status == Status.APPROVED || config.isAdmin(friend.id)) showMyInvite(friend, screen)
+            "ref_skip" -> {
+                awaitingReferrer.remove(friend.id)
+                screen.show(Texts.REFERRER_THANKS, emptyList())
+            }
             "survey" -> if (friend.status == Status.APPROVED) askSurvey(friend.id, Texts.SURVEY_MANUAL, screen) else showHome(chatId, friend, screen)
             else -> when {
                 data.startsWith("sv:") -> onSurveyButton(chatId, friend, screen, data)
@@ -293,9 +351,14 @@ class FriendsBot(
         store.requestAccess(friend.id, now())
         screen.show(Texts.REQUEST_SENT, deviceKeyboard(withBack = false))
         notifyAdmins(
-            "🆕 <b>Заявка на доступ</b>\n${friend.title.escapeHtml()}\nid <code>${friend.id}</code>",
+            "🆕 <b>Заявка на доступ</b>\n${friend.title.escapeHtml()}\nid <code>${friend.id}</code>\nПришёл: ${referrerText(friend)}",
             decisionKeyboard(friend.id),
         )
+        // по общей ссылке не видно, кто её переслал: спросим самого человека
+        if (friend.invitedBy == null && !config.isAdmin(friend.id)) {
+            awaitingReferrer.add(friend.id)
+            telegram.sendMessage(friend.id, Texts.ASK_REFERRER, listOf(listOf(Button("Пропустить »", "ref_skip"))))
+        }
     }
 
     /** "Где мой конфиг?": успокаиваем и напоминаем админу, но не чаще раза в [REMIND_EVERY]. */
@@ -738,6 +801,7 @@ class FriendsBot(
             listOf(button(ListKind.NEVER, "⚪ Не подключались"), button(ListKind.PENDING, "🕐 Заявки")),
             listOf(button(ListKind.ALL, "👥 Все"), Button("🗳 Опрос", "ap:survey")),
             listOf(Button("🖥 Сервер", "ap:server"), Button("🔗 Ссылка", "ap:invite")),
+            listOf(Button("🤝 Кто кого позвал", "ap:tree")),
             listOf(Button("🔄 Обновить", "ap:home"), Button("« Меню", "home")),
         ))
     }
@@ -758,7 +822,32 @@ class FriendsBot(
             "survey" -> screen.show(surveyReport().take(MESSAGE_LIMIT), back)
             "server" -> screen.show(serverReport(), listOf(listOf(Button("🔄 Обновить", "ap:server"))) + back)
             "invite" -> screen.show(inviteText(), back)
+            "tree" -> screen.show(inviteTree().take(MESSAGE_LIMIT), back)
         }
+    }
+
+    /** Дерево приглашений: от админа (общая ссылка) вниз по личным ссылкам. */
+    private fun inviteTree(): String {
+        val people = store.all().filter { it.status != Status.NEW || it.invitedAt != null }
+        val children = people.filter { it.invitedBy != null }.groupBy { it.invitedBy!! }
+        val ids = people.map { it.id }.toSet()
+        fun mark(friend: Friend) = when (friend.status) {
+            Status.APPROVED -> if (friend.firstSeenAt != null) "🟢" else "⚪"
+            Status.PENDING -> "🕐"
+            else -> "✖️"
+        }
+        return buildString {
+            appendLine("🤝 <b>Кто кого позвал</b>")
+            appendLine("🟢 подключался · ⚪ доступ есть, не подключался · 🕐 ждёт · ✖️ отклонён/отключён")
+            appendLine()
+            fun walk(friend: Friend, depth: Int, seen: Set<Long>) {
+                val note = friend.referrerNote?.let { " <i>(говорит: от «${it.escapeHtml()}»)</i>" } ?: ""
+                appendLine("${"    ".repeat(depth)}${if (depth > 0) "└ " else ""}${mark(friend)} ${friend.title.escapeHtml()}$note")
+                children[friend.id].orEmpty().filter { it.id !in seen }.forEach { walk(it, depth + 1, seen + it.id) }
+            }
+            // корни: пришли по общей ссылке, до приглашений или от того, кого уже нет в списке
+            people.filter { it.invitedBy == null || it.invitedBy !in ids }.forEach { walk(it, 0, setOf(it.id)) }
+        }.trim()
     }
 
     private fun showList(screen: Screen, kind: ListKind) {
@@ -786,6 +875,9 @@ class FriendsBot(
             appendLine("id <code>${friend.id}</code> · ${statusTitle(friend.status)} · ${friend.device?.title ?: "устройство не выбрано"}")
             friend.ipIndex?.let { appendLine("Адрес: ${configs.ipv4(it)}") }
             appendLine()
+            appendLine("Пришёл: ${referrerText(friend)}")
+            val invited = store.all().filter { it.invitedBy == friend.id }
+            if (invited.isNotEmpty()) appendLine("Позвал сам (${invited.size}): ${invited.joinToString(", ") { it.name.escapeHtml() }}")
             appendLine("Заявка: ${date(friend.requestedAt)} · доступ: ${date(friend.approvedAt)}")
             appendLine("«Установилось»: ${friend.installedAt?.let { date(it) } ?: "не нажимал"}")
             appendLine("Первое подключение: ${date(friend.firstSeenAt)}")
@@ -910,6 +1002,7 @@ $verdict
         listOf(Button("📲 Установить приложение", "devices")),
         listOf(Button("🔀 Режимы работы", "modes"), Button("📘 Инструкция", "guide")),
         listOf(Button("🆘 Не работает", "trouble"), Button("💬 Оставить отзыв", "survey")),
+        listOf(Button("🤝 Пригласить друга", "invite_me")),
     )
 
     private fun resultKeyboard(): Keyboard = SurveyResult.entries.map { listOf(Button(it.title, "sv:r:${it.name}")) }
@@ -981,6 +1074,7 @@ $verdict
         const val MESSAGE_LIMIT = 4000
         const val INVITE_LENGTH = 12
         const val MAX_LIST = 40
+        val PERSONAL_CODE = Regex("f(\\d+)x([0-9a-f]{10})")
         /** Рукопожатие не старше этого - человек сейчас онлайн (keepalive каждые 25 с, рукопожатие раз в 2 мин). */
         val ONLINE_WINDOW: Duration = Duration.ofMinutes(3)
 

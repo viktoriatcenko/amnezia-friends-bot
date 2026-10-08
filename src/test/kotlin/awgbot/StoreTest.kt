@@ -66,7 +66,7 @@ class StoreTest {
         }
         val store = Store(file.path)
         store.setInstalled(7, now = 5)
-        store.setInvited(7, now = 6)
+        store.setInvited(7, now = 6, by = null)
         assertEquals(5L, store.get(7)!!.installedAt)
         assertEquals(Funnel(requested = 1, approved = 1, installed = 1, connected = 0), store.funnel())
     }

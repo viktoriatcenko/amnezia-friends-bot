@@ -43,6 +43,10 @@ data class Friend(
     val lastSeenAt: Long? = null,
     /** Пришёл по ссылке-приглашению; без неё бот новичков не пускает. */
     val invitedAt: Long? = null,
+    /** Чья личная ссылка привела; null - общая ссылка админа. */
+    val invitedBy: Long? = null,
+    /** Пришёл по общей ссылке и сам написал, кто её дал. */
+    val referrerNote: String? = null,
 ) {
     /** Как пользователь показывается админу. */
     val title: String
@@ -76,9 +80,10 @@ class Store(path: String) {
             val existing = it.executeQuery("pragma table_info(friends)").use { rs ->
                 generateSequence { if (rs.next()) rs.getString("name") else null }.toSet()
             }
-            for (column in listOf("approved_at", "installed_at", "first_seen_at", "last_seen_at", "invited_at")) {
+            for (column in listOf("approved_at", "installed_at", "first_seen_at", "last_seen_at", "invited_at", "invited_by")) {
                 if (column !in existing) it.executeUpdate("alter table friends add column $column integer")
             }
+            if ("referrer_note" !in existing) it.executeUpdate("alter table friends add column referrer_note text")
             // трафик по дням (по Москве), чтобы видеть, кто пользуется, а кто нет
             it.executeUpdate(
                 """
@@ -168,7 +173,15 @@ class Store(path: String) {
         )
 
     @Synchronized
-    fun setInvited(id: Long, now: Long) = update(id, "invited_at = coalesce(invited_at, ?)", now)
+    fun setInvited(id: Long, now: Long, by: Long?) =
+        update(id, "invited_at = coalesce(invited_at, ?), invited_by = coalesce(invited_by, ?)", now, by)
+
+    @Synchronized
+    fun setReferrerNote(id: Long, note: String) = update(id, "referrer_note = ?", note)
+
+    /** Все, кто когда-либо писал боту (для дерева приглашений). */
+    @Synchronized
+    fun all(): List<Friend> = list(*Status.entries.toTypedArray())
 
     @Synchronized
     fun setInstalled(id: Long, now: Long) = update(id, "installed_at = coalesce(installed_at, ?)", now)
@@ -363,6 +376,8 @@ class Store(path: String) {
         firstSeenAt = getLong("first_seen_at").takeUnless { wasNull() },
         lastSeenAt = getLong("last_seen_at").takeUnless { wasNull() },
         invitedAt = getLong("invited_at").takeUnless { wasNull() },
+        invitedBy = getLong("invited_by").takeUnless { wasNull() },
+        referrerNote = getString("referrer_note"),
     )
 
     private fun ResultSet.toSurvey() = Survey(
