@@ -6,6 +6,7 @@ import com.google.zxing.qrcode.QRCodeWriter
 import com.google.zxing.qrcode.decoder.ErrorCorrectionLevel
 import java.awt.image.BufferedImage
 import java.io.ByteArrayOutputStream
+import java.util.Base64
 import javax.imageio.ImageIO
 
 /** Инструкция одним HTML-файлом: те же тексты, что в боте, чтобы не расходились. */
@@ -24,8 +25,13 @@ object Guide {
             "Если что-то не работает" to Texts.TROUBLE,
         )
         val toc = sections.mapIndexed { i, (title, _) -> """<li><a href="#s$i">$title</a></li>""" }.joinToString("\n")
+        val pictures = mapOf("iPhone: добавить конфиг" to Steps.forImport(Device.IOS))
         val body = sections.mapIndexed { i, (title, text) ->
-            """<section id="s$i"><h2>$title</h2><p>${text.trim().replace("\n", "<br>\n")}</p></section>"""
+            val images = pictures[title].orEmpty().joinToString("") {
+                """<img src="data:image/jpeg;base64,${Base64.getEncoder().encodeToString(it.bytes)}" alt="">"""
+            }
+            val gallery = if (images.isEmpty()) "" else """<div class="steps">$images</div>"""
+            """<section id="s$i"><h2>$title</h2>$gallery<p>${text.trim().replace("\n", "<br>\n")}</p></section>"""
         }.joinToString("\n")
         return """<!doctype html>
 <html lang="ru">
@@ -46,6 +52,8 @@ object Guide {
   nav, section { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 16px 18px; margin: 14px 0; }
   nav ol { margin: 0; padding-left: 20px; }
   a { color: var(--accent); }
+  .steps { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; margin: 0 0 12px; }
+  .steps img { width: 100%; border-radius: 10px; border: 1px solid var(--line); }
   code { background: var(--line); border-radius: 5px; padding: 1px 5px; font-size: 14px; word-break: break-all; }
 </style>
 </head>

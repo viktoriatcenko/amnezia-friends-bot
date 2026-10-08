@@ -263,7 +263,12 @@ class FriendsBot(
             else -> when {
                 data.startsWith("sv:") -> onSurveyButton(chatId, friend, screen, data)
                 data.startsWith("ios:region:") -> showRegionStep(screen, data.substringAfterLast(':').toInt())
-                data.startsWith("import:") -> screen.show(importText(Device.valueOf(data.substringAfter(':'))), listOf(helpRow(), backRow()))
+                data.startsWith("import:") -> {
+                    val device = Device.valueOf(data.substringAfter(':'))
+                    val keyboard = listOf(helpRow(), backRow())
+                    if (Steps.forImport(device).isEmpty()) screen.show(importText(device), keyboard)
+                    else sendImport(chatId, device, keyboard)
+                }
             }
         }
     }
@@ -478,8 +483,23 @@ class FriendsBot(
             InputFile.Upload(configs.fileName(Mode.BLOCKED), configs.build(friend, Mode.BLOCKED).toByteArray()),
             Texts.CONFIG_BLOCKED_CAPTION,
         )
-        if (device != null) telegram.sendMessage(chatId, importText(device), keyboard)
+        if (device != null) sendImport(chatId, device, keyboard)
         else telegram.sendMessage(chatId, "Куда будете ставить? Покажу, как добавить конфиг 👇", deviceKeyboard() + listOf(keyboard.first()))
+    }
+
+    /** "Как добавить конфиг": сначала картинки со стрелками (если есть для устройства), под ними текст. */
+    private fun sendImport(chatId: Long, device: Device, keyboard: Keyboard) {
+        val images = Steps.forImport(device)
+        try {
+            when (images.size) {
+                0 -> Unit
+                1 -> telegram.sendPhoto(chatId, InputFile.Upload(images[0].name, images[0].bytes))
+                else -> telegram.sendAlbum(chatId, images.map { InputFile.Upload(it.name, it.bytes) })
+            }
+        } catch (e: Exception) {
+            log.warn("Could not send step images for {}: {}", device, e.message)
+        }
+        telegram.sendMessage(chatId, importText(device), keyboard)
     }
 
     private fun sendFullConfig(chatId: Long, friend: Friend) {

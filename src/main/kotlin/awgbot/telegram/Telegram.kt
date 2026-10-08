@@ -116,6 +116,40 @@ class TelegramClient(token: String, private val json: Json) {
         return response.body()
     }
 
+    /** Альбом из 2-10 картинок одним сообщением. */
+    fun sendAlbum(chatId: Long, photos: List<InputFile.Upload>) {
+        require(photos.size in 2..10) { "album must have 2..10 photos, got ${photos.size}" }
+        val boundary = "awgbot-" + UUID.randomUUID()
+        val body = ByteArrayOutputStream()
+        fun part(name: String, value: String) {
+            body.write("--$boundary\r\nContent-Disposition: form-data; name=\"$name\"\r\n\r\n$value\r\n".toByteArray())
+        }
+        part("chat_id", chatId.toString())
+        part("media", buildJsonArray {
+            photos.indices.forEach { i ->
+                addJsonObject {
+                    put("type", "photo")
+                    put("media", "attach://p$i")
+                }
+            }
+        }.toString())
+        photos.forEachIndexed { i, photo ->
+            body.write(
+                ("--$boundary\r\nContent-Disposition: form-data; name=\"p$i\"; filename=\"${photo.name}\"\r\n" +
+                    "Content-Type: image/jpeg\r\n\r\n").toByteArray()
+            )
+            body.write(photo.bytes)
+            body.write("\r\n".toByteArray())
+        }
+        body.write("--$boundary--\r\n".toByteArray())
+        val request = HttpRequest.newBuilder(URI.create("$baseUrl/sendMediaGroup"))
+            .timeout(Duration.ofMinutes(2))
+            .header("Content-Type", "multipart/form-data; boundary=$boundary")
+            .POST(HttpRequest.BodyPublishers.ofByteArray(body.toByteArray()))
+            .build()
+        parse("sendMediaGroup", http.send(request, HttpResponse.BodyHandlers.ofString()), JsonElement.serializer())
+    }
+
     /** Меню команд по кнопке "/" в личке с ботом. */
     fun setCommands(commands: Map<String, String>) {
         val body = buildJsonObject {
