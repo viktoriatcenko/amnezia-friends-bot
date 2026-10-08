@@ -1,0 +1,20 @@
+[Unit]
+Description=Telegram bot that hands out AmneziaWG (awg1) configs to friends
+After=network-online.target awg-quick@awg1.service
+Wants=network-online.target
+
+[Service]
+User=awgbot
+WorkingDirectory=/opt/awgbot
+Environment=JAVA_HOME=/opt/awgbot/jre
+Environment=DATABASE_PATH=/opt/awgbot/data/awgbot.db
+Environment=CACHE_DIR=/opt/awgbot/data/cache
+Environment="JAVA_OPTS=-Xmx128m -XX:+UseSerialGC -Xss512k -XX:TieredStopAtLevel=1"
+EnvironmentFile=/opt/awgbot/server.env
+EnvironmentFile=/opt/awgbot/.env
+ExecStart=/opt/awgbot/app/bin/amnezia-friends-bot
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

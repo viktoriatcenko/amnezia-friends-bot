@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Единственное, что бот (пользователь awgbot) может делать от root через sudo:
+# добавить или удалить пира в awg1 и посмотреть статистику. Аргументы проверяются строго.
+# Пир меняется сразу в работающем интерфейсе и в awg1.conf (чтобы пережил перезагрузку).
+# awg-quick save не используем: он дописывает в конфиг служебные параметры со значением 0.
+set -euo pipefail
+
+IF=awg1
+CONF=/etc/amnezia/amneziawg/$IF.conf
+key_re='^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw480]=$'
+ipv4_re='^10\.9\.0\.([2-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-4])$'
+ipv6_re='^fd09:9::[0-9a-f]{1,2}$'
+
+bad_args() { echo "bad arguments" >&2; exit 2; }
+
+# Убирает из конфига секцию [Peer] с ключом $1.
+drop_peer_from_conf() {
+    local tmp
+    tmp=$(mktemp "$CONF.XXXXXX")
+    awk -v key="$1" '
+        function flush() { if (buf != "" && !skip) printf "%s", buf; buf = ""; skip = 0 }
+        /^\[/ { flush() }
+        { buf = buf $0 "\n" }
+        $1 == "PublicKey" && $3 == key { skip = 1 }
+        END { flush() }
+    ' "$CONF" > "$tmp"
+    chmod 600 "$tmp"
+    mv "$tmp" "$CONF"
+}
+
+exec 9>"/run/awgbot-peer.lock"
+flock 9
+
+case "${1:-}" in
+    add)
+        [[ $# -eq 4 && $2 =~ $key_re && $3 =~ $ipv4_re && $4 =~ $ipv6_re ]] || bad_args
+        awg set "$IF" peer "$2" allowed-ips "$3/32,$4/128"
+        drop_peer_from_conf "$2"
+        # пустая строка-разделитель, только если ее еще нет (иначе при add/remove они копятся)
+        if tail -n 1 "$CONF" | grep -q .; then echo >> "$CONF"; fi
+        printf '[Peer]\nPublicKey = %s\nAllowedIPs = %s/32, %s/128\n' "$2" "$3" "$4" >> "$CONF"
+        ;;
+    remove)
+        [[ $# -eq 2 && $2 =~ $key_re ]] || bad_args
+        awg set "$IF" peer "$2" remove
+        drop_peer_from_conf "$2"
+        ;;
+    dump)
+        # первая строка - интерфейс с приватным ключом сервера, боту она не нужна
+        awg show "$IF" dump | tail -n +2
+        ;;
+    *)
+        echo "usage: $0 add <pubkey> <ipv4> <ipv6> | remove <pubkey> | dump" >&2
+        exit 2
+        ;;
+esac
