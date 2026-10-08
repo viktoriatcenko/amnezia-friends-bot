@@ -14,5 +14,6 @@ fun main() {
         configs = ClientConfigs(config.server, ClientConfigs.loadBlockedRoutes()),
         apps = Apps(Path.of(config.cacheDir), json),
         config = config,
+        load = ServerLoad(config.netIface),
     ).run()
 }

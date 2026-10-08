@@ -14,7 +14,9 @@ EnvironmentFile=/opt/awgbot/server.env
 EnvironmentFile=/opt/awgbot/.env
 ExecStart=/opt/awgbot/app/bin/amnezia-friends-bot
 Restart=always
+# java на SIGTERM выходит с кодом 143 - это штатная остановка
 RestartSec=10
+SuccessExitStatus=143
 
 [Install]
 WantedBy=multi-user.target

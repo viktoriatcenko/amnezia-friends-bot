@@ -9,6 +9,9 @@ data class Config(
     val cacheDir: String,
     /** Куда сохранять скриншоты, которые админ присылает боту (для картинок в инструкции). */
     val inboxDir: String,
+    /** Внешний интерфейс сервера и его канал: для экрана «Сервер» в админке. */
+    val netIface: String,
+    val channelMbit: Int,
     /** Команда, через которую бот (не root) добавляет и удаляет пиров, см. deploy/awgbot-peer. */
     val peerHelper: List<String>,
     val server: ServerParams,
@@ -27,6 +30,8 @@ data class Config(
             databasePath = optional("DATABASE_PATH", "data/awgbot.db"),
             cacheDir = optional("CACHE_DIR", "data/cache"),
             inboxDir = optional("INBOX_DIR", "data/inbox"),
+            netIface = optional("NET_IFACE", "eth0"),
+            channelMbit = optional("CHANNEL_MBIT", "300").toInt(),
             peerHelper = optional("PEER_HELPER", "sudo -n /usr/local/sbin/awgbot-peer").split(" ").filter { it.isNotEmpty() },
             server = ServerParams(
                 endpoint = required("AWG_ENDPOINT"),

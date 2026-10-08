@@ -18,6 +18,7 @@ import java.time.LocalDateTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.concurrent.Executors
+import java.util.Locale
 import java.util.concurrent.TimeUnit
 
 class FriendsBot(
@@ -27,6 +28,7 @@ class FriendsBot(
     private val configs: ClientConfigs,
     private val apps: Apps,
     private val config: Config,
+    private val load: ServerLoad,
 ) {
     private val log = LoggerFactory.getLogger(FriendsBot::class.java)
 
@@ -101,7 +103,8 @@ class FriendsBot(
                 awaitingHelp.remove(from.id)
                 showHome(chatId, friend)
             }
-            "/invite" -> if (admin) inviteCommand(chatId, message.argument) else unknown(chatId)
+            "/invite" -> if (admin) telegram.sendMessage(chatId, inviteText()) else unknown(chatId)
+            "/admin" -> if (admin) showAdmin(Screen(chatId, null)) else unknown(chatId)
             "/config" -> if (friend.status == Status.APPROVED) sendConfig(chatId, friend) else showHome(chatId, friend)
             "/guide" -> sendGuide(chatId)
             "/help" -> telegram.sendMessage(chatId, Texts.HELP + if (admin) Texts.ADMIN_HELP else "")
@@ -122,27 +125,21 @@ class FriendsBot(
     /** Новичка пускаем только по ссылке-приглашению; кто уже подавал заявку - свой. */
     private fun allowed(friend: Friend) = friend.status != Status.NEW || friend.invitedAt != null
 
-    private fun inviteCode(): String = store.meta("invite_code") ?: newInviteCode()
-
-    private fun newInviteCode(): String {
+    /** Одна постоянная ссылка на всех: код придумывается один раз и хранится в базе. */
+    @Synchronized
+    private fun inviteCode(): String = store.meta("invite_code") ?: run {
         val alphabet = ('a'..'z') + ('A'..'Z') + ('0'..'9')
         val random = SecureRandom()
         val code = (1..INVITE_LENGTH).map { alphabet[random.nextInt(alphabet.size)] }.joinToString("")
         store.setMeta("invite_code", code)
-        return code
+        code
     }
 
-    private fun inviteCommand(chatId: Long, argument: String) {
-        val code = if (argument == "new") newInviteCode() else inviteCode()
-        val link = "https://t.me/$botUsername?start=$code"
-        val note = if (argument == "new") "Старая ссылка больше не работает (кто уже пришёл по ней, останутся).\n\n" else ""
-        telegram.sendMessage(
-            chatId,
-            "🔗 <b>Ссылка-приглашение</b>\n<code>$link</code>\n\n$note" +
-                "Кто откроет её, сможет отправить заявку. Остальным бот ответит, что он закрытый. " +
-                "Новую ссылку (если эта утекла): /invite new",
-        )
-    }
+    private fun inviteLink() = "https://t.me/$botUsername?start=${inviteCode()}"
+
+    private fun inviteText() = "🔗 <b>Ссылка-приглашение</b>\n<code>${inviteLink()}</code>\n\n" +
+        "Ссылка одна и не меняется. Кто откроет её, сможет отправить заявку, а доступ всё равно выдаёте вы. " +
+        "Остальным бот ответит, что он закрытый."
 
     // ---------- Переписка с админом ----------
 
@@ -215,6 +212,10 @@ class FriendsBot(
             if (config.isAdmin(query.from.id)) onAdminButton(query.from.id, chatId, messageId, data)
             return
         }
+        if (data.startsWith("ap:")) {
+            if (config.isAdmin(query.from.id)) onPanelButton(Screen(chatId, messageId), data)
+            return
+        }
         if (!config.isAdmin(query.from.id) && !allowed(friend)) return
         val screen = Screen(chatId, messageId)
         when (data) {
@@ -283,7 +284,8 @@ class FriendsBot(
             Status.REJECTED -> Texts.REJECTED to emptyList()
             Status.REVOKED -> Texts.REVOKED to emptyList()
         }
-        (screen ?: Screen(chatId, null)).show(text, keyboard)
+        val withPanel = if (config.isAdmin(friend.id)) keyboard + listOf(listOf(Button("👑 Админка", "ap:home"))) else keyboard
+        (screen ?: Screen(chatId, null)).show(text, withPanel)
     }
 
     private fun requestAccess(chatId: Long, friend: Friend, screen: Screen) {
@@ -424,6 +426,7 @@ class FriendsBot(
     }
 
     /** Раз в [MONITOR_EVERY]: пишет трафик по дням, поздравляет с первым подключением, зовёт в опрос, шлёт сводку. */
+    @Synchronized
     private fun monitorTick() {
         val stats = awg.stats()
         val day = today()
@@ -441,6 +444,7 @@ class FriendsBot(
                 log.warn("Could not message {}: {}", friend.id, e.message)
             }
         }
+        recordPeak()
         maybeSendDigest()
     }
 
@@ -649,38 +653,204 @@ class FriendsBot(
      * "Активный день" - хотя бы [ACTIVE_DAY_BYTES]: включённый без дела VPN за сутки набирает меньше на keepalive.
      */
     private fun statsReport(): String {
-        val friends = store.list(Status.APPROVED)
+        val usage = UsageView()
         val funnel = store.funnel()
-        val week = store.activeDaysSince(daysAgo(6), ACTIVE_DAY_BYTES)
-        val month = store.trafficSince(daysAgo(29))
-        val todayActive = store.activeDaysSince(today(), ACTIVE_DAY_BYTES).size
-        val (never, connected) = friends.partition { it.firstSeenAt == null }
-        val (active, idle) = connected.partition { (week[it.id] ?: 0) > 0 }
-
         return buildString {
             appendLine("📊 <b>Статистика</b>")
             appendLine()
             appendLine("Воронка: заявок ${funnel.requested} → доступ ${funnel.approved} → «Установилось» ${funnel.installed} → подключились ${funnel.connected}")
-            appendLine("Сейчас с доступом: ${friends.size}, сегодня активны: $todayActive, трафик за 30 дней: ${size(month.values.sum())}")
-            appendLine()
-            appendLine("🟢 <b>Пользуются</b> (трафик за 7 дней): ${active.size}")
-            active.sortedByDescending { month[it.id] ?: 0 }.forEach {
-                appendLine("• ${it.title.escapeHtml()}: ${week[it.id]} из 7 дн, ${size(month[it.id] ?: 0)} за 30 дн, был ${ago(it.lastSeenAt)}")
-            }
-            appendLine()
-            appendLine("🟡 <b>Забросили</b> (7+ дней тишина): ${idle.size}")
-            idle.sortedBy { it.lastSeenAt ?: 0 }.forEach {
-                appendLine("• ${it.title.escapeHtml()}: был ${ago(it.lastSeenAt)}, ${size(month[it.id] ?: 0)} за 30 дн")
-            }
-            appendLine()
-            appendLine("⚪ <b>Ни разу не подключались</b>: ${never.size}")
-            never.forEach {
-                val installed = if (it.installedAt != null) "нажал «Установилось»" else "не нажал «Установилось»"
-                appendLine("• ${it.title.escapeHtml()}: доступ ${since(it.approvedAt ?: it.requestedAt)} назад, ${it.device?.title ?: "устройство ?"}, $installed")
+            appendLine("Сейчас с доступом: ${usage.approved.size}, трафик за 30 дней: ${size(usage.month.values.sum())}")
+            for (kind in listOf(ListKind.ACTIVE, ListKind.IDLE, ListKind.NEVER)) {
+                appendLine()
+                appendLine("${kind.title}: ${usage.of(kind).size}")
+                usage.of(kind).forEach { appendLine(usage.line(it)) }
             }
             appendLine()
             append(surveyReport())
         }.trim()
+    }
+
+    // ---------- Админка (кнопки) ----------
+
+    /** Какие списки пользователей есть в админке. */
+    private enum class ListKind(val code: String, val title: String) {
+        ACTIVE("active", "🟢 <b>Пользуются</b> (трафик за 7 дней)"),
+        IDLE("idle", "🟡 <b>Забросили</b> (подключались, но 7+ дней тишина)"),
+        NEVER("never", "⚪ <b>Ни разу не подключались</b>"),
+        PENDING("pending", "🕐 <b>Ждут одобрения</b>"),
+        ALL("all", "👥 <b>Все с доступом</b>"),
+    }
+
+    /**
+     * Срез "кто пользуется": активный день - хотя бы [ACTIVE_DAY_BYTES] трафика
+     * (включённый без дела VPN за сутки набирает меньше на keepalive).
+     */
+    private inner class UsageView {
+        val approved = store.list(Status.APPROVED)
+        val activeDays = store.activeDaysSince(daysAgo(6), ACTIVE_DAY_BYTES)
+        val today = store.trafficSince(today())
+        val week = store.trafficSince(daysAgo(6))
+        val month = store.trafficSince(daysAgo(29))
+
+        fun of(kind: ListKind): List<Friend> = when (kind) {
+            ListKind.ACTIVE -> approved.filter { it.firstSeenAt != null && (activeDays[it.id] ?: 0) > 0 }
+                .sortedByDescending { week[it.id] ?: 0 }
+            ListKind.IDLE -> approved.filter { it.firstSeenAt != null && (activeDays[it.id] ?: 0) == 0 }
+                .sortedBy { it.lastSeenAt ?: 0 }
+            ListKind.NEVER -> approved.filter { it.firstSeenAt == null }
+            ListKind.PENDING -> store.list(Status.PENDING)
+            ListKind.ALL -> approved.sortedByDescending { it.lastSeenAt ?: 0 }
+        }
+
+        /** Одна строка про пользователя для списков. */
+        fun line(friend: Friend): String {
+            val name = friend.title.escapeHtml()
+            return when {
+                friend.status == Status.PENDING -> "• $name: ждёт ${since(friend.requestedAt)}"
+                friend.firstSeenAt == null -> {
+                    val installed = if (friend.installedAt != null) "нажал «Установилось»" else "не нажал «Установилось»"
+                    "• $name: доступ ${since(friend.approvedAt ?: friend.requestedAt)} назад, ${friend.device?.title ?: "устройство ?"}, $installed"
+                }
+                else -> "• $name: ${activeDays[friend.id] ?: 0} из 7 дн, ${size(week[friend.id] ?: 0)} за неделю, был ${ago(friend.lastSeenAt)}"
+            }
+        }
+    }
+
+    private fun showAdmin(screen: Screen) {
+        runCatching { monitorTick() }.onFailure { log.warn("monitor tick before panel failed: {}", it.message) }
+        val usage = UsageView()
+        val counts = ListKind.entries.associateWith { usage.of(it).size }
+        val peak = store.meta("peak:${today()}")?.toDouble() ?: 0.0
+        val activeToday = usage.today.count { it.value >= ACTIVE_DAY_BYTES }
+        val text = """👑 <b>Админка</b>
+
+👥 С доступом: <b>${usage.approved.size}</b> (мест в подсети ${LAST_IP - FIRST_IP + 1})
+🟢 Пользуются: <b>${counts[ListKind.ACTIVE]}</b> · 🟡 Забросили: <b>${counts[ListKind.IDLE]}</b> · ⚪ Не подключались: <b>${counts[ListKind.NEVER]}</b>
+🕐 Ждут одобрения: <b>${counts[ListKind.PENDING]}</b>
+
+📶 Сегодня пользовались: $activeToday, трафик за неделю: ${size(usage.week.values.sum())}
+🖥 Пик нагрузки сегодня: ${"%.0f".format(peak)} из ${config.channelMbit} Мбит/с
+
+<i>«Пользуются» = был трафик хотя бы в один из последних 7 дней.</i>"""
+        fun button(kind: ListKind, label: String) = Button("$label (${counts[kind]})", "ap:l:${kind.code}")
+        screen.show(text, listOf(
+            listOf(button(ListKind.ACTIVE, "🟢 Пользуются"), button(ListKind.IDLE, "🟡 Забросили")),
+            listOf(button(ListKind.NEVER, "⚪ Не подключались"), button(ListKind.PENDING, "🕐 Заявки")),
+            listOf(button(ListKind.ALL, "👥 Все"), Button("🗳 Опрос", "ap:survey")),
+            listOf(Button("🖥 Сервер", "ap:server"), Button("🔗 Ссылка", "ap:invite")),
+            listOf(Button("🔄 Обновить", "ap:home"), Button("« Меню", "home")),
+        ))
+    }
+
+    private fun onPanelButton(screen: Screen, data: String) {
+        val parts = data.split(':')
+        val back = listOf(listOf(Button("« Админка", "ap:home")))
+        when (parts[1]) {
+            "home" -> showAdmin(screen)
+            "l" -> showList(screen, ListKind.entries.first { it.code == parts[2] })
+            "u" -> store.get(parts[2].toLong())?.let { showCard(screen, it) }
+            "rv" -> store.get(parts[2].toLong())?.let {
+                screen.show(
+                    "🔒 Отключить доступ для ${it.title.escapeHtml()}?\nКонфиг перестанет работать сразу.",
+                    listOf(listOf(Button("Да, отключить", "adm:rv:${it.id}"), Button("« Нет", "ap:u:${it.id}"))),
+                )
+            }
+            "survey" -> screen.show(surveyReport().take(MESSAGE_LIMIT), back)
+            "server" -> screen.show(serverReport(), listOf(listOf(Button("🔄 Обновить", "ap:server"))) + back)
+            "invite" -> screen.show(inviteText(), back)
+        }
+    }
+
+    private fun showList(screen: Screen, kind: ListKind) {
+        val usage = UsageView()
+        val friends = usage.of(kind)
+        val text = buildString {
+            appendLine("${kind.title}: ${friends.size}")
+            appendLine()
+            if (friends.isEmpty()) appendLine("Пока никого")
+            friends.take(MAX_LIST).forEach { appendLine(usage.line(it)) }
+            if (friends.size > MAX_LIST) appendLine("…и ещё ${friends.size - MAX_LIST}")
+            if (friends.isNotEmpty()) append("\nНажмите на человека, чтобы открыть карточку 👇")
+        }
+        val buttons = friends.take(MAX_LIST).map { Button(it.name.take(24), "ap:u:${it.id}") }.chunked(2)
+        screen.show(text.take(MESSAGE_LIMIT), buttons + listOf(listOf(Button("« Админка", "ap:home"))))
+    }
+
+    private fun showCard(screen: Screen, friend: Friend) {
+        val usage = UsageView()
+        val peer = friend.publicKey?.let { runCatching { awg.stats()[it] }.getOrNull() }
+        val online = peer != null && peer.lastHandshake > 0 && now() - peer.lastHandshake < ONLINE_WINDOW.seconds
+        val survey = store.survey(friend.id)
+        val text = buildString {
+            appendLine("👤 <b>${friend.name.escapeHtml()}</b>" + (friend.username?.let { " @$it" } ?: ""))
+            appendLine("id <code>${friend.id}</code> · ${statusTitle(friend.status)} · ${friend.device?.title ?: "устройство не выбрано"}")
+            friend.ipIndex?.let { appendLine("Адрес: ${configs.ipv4(it)}") }
+            appendLine()
+            appendLine("Заявка: ${date(friend.requestedAt)} · доступ: ${date(friend.approvedAt)}")
+            appendLine("«Установилось»: ${friend.installedAt?.let { date(it) } ?: "не нажимал"}")
+            appendLine("Первое подключение: ${date(friend.firstSeenAt)}")
+            appendLine("Последний раз: ${if (online) "🟢 сейчас онлайн" else ago(lastSeen(friend, peer))}")
+            appendLine()
+            appendLine("Трафик: сегодня ${size(usage.today[friend.id] ?: 0)} · неделя ${size(usage.week[friend.id] ?: 0)} · 30 дней ${size(usage.month[friend.id] ?: 0)}")
+            appendLine("Активных дней за неделю: ${usage.activeDays[friend.id] ?: 0} из 7")
+            if (survey?.result != null) {
+                appendLine()
+                appendLine("🗳 Опрос: ${survey.result.title}")
+                appendLine("VPN раньше: ${survey.prevVpn?.title ?: "—"}" + (survey.prevVpnName?.let { " (${it.escapeHtml()})" } ?: ""))
+                appendLine("Инструкция: ${survey.difficulty?.title ?: "—"}")
+                survey.comment?.let { appendLine("💬 «${it.take(500).escapeHtml()}»") }
+            }
+        }
+        val keyboard = buildList {
+            add(listOf(Button("✉️ Написать", "adm:re:${friend.id}")))
+            when (friend.status) {
+                Status.APPROVED -> add(listOf(Button("🔒 Отключить доступ", "ap:rv:${friend.id}")))
+                Status.PENDING -> addAll(decisionKeyboard(friend.id))
+                else -> Unit
+            }
+            add(listOf(Button("« Админка", "ap:home")))
+        }
+        screen.show(text.trim(), keyboard)
+    }
+
+    private fun serverReport(): String {
+        val now = load.measure()
+        val peers = runCatching { awg.stats() }.getOrDefault(emptyMap())
+        val online = peers.values.count { it.lastHandshake > 0 && now() - it.lastHandshake < ONLINE_WINDOW.seconds }
+        val todayPeak = store.meta("peak:${today()}")?.toDouble() ?: 0.0
+        val weekPeak = (0L..6L).maxOf { store.meta("peak:${daysAgo(it)}")?.toDouble() ?: 0.0 }
+        val channel = config.channelMbit
+        val verdict = when {
+            weekPeak < channel * 0.5 -> "✅ Запас большой, можно смело добавлять людей."
+            weekPeak < channel * 0.8 -> "🟡 В пики загружено больше половины канала. Пока нормально, но следите."
+            else -> "🔴 В пики канал почти забит, у людей может падать скорость. Пора второй сервер или тариф пошире."
+        }
+        return """🖥 <b>Сервер</b>
+
+Сейчас: ↓ ${"%.1f".format(now.inMbit)} · ↑ ${"%.1f".format(now.outMbit)} Мбит/с (весь сервер, с вашим личным VPN)
+Процессор: ${"%.0f".format(now.cpuPercent)}% · свободно памяти: ${now.memAvailableMb} МБ
+Друзей онлайн прямо сейчас: $online из ${peers.size}
+
+Пик нагрузки (среднее за 10 мин): сегодня ${"%.0f".format(todayPeak)}, за неделю ${"%.0f".format(weekPeak)} из $channel Мбит/с
+$verdict
+
+<i>Канал ≈$channel Мбит/с в каждую сторону. Видео 1080p ≈ 5–8 Мбит/с, 4K ≈ 20. Обычно одновременно смотрит 10–20% людей, так что комфортно ≈ 60–80 активных друзей.</i>"""
+    }
+
+    /** Пиковая (за интервал тика) скорость за день: max(вход, выход), сохраняется в meta "peak:<день>". */
+    private var lastNet: Triple<Long, Long, Long>? = null
+
+    private fun recordPeak() {
+        val (rx, tx) = runCatching { load.netBytes() }.getOrNull() ?: return
+        val millis = System.currentTimeMillis()
+        val previous = lastNet
+        lastNet = Triple(rx, tx, millis)
+        if (previous == null || rx < previous.first || tx < previous.second) return
+        val elapsed = millis - previous.third
+        if (elapsed < 60_000) return // слишком короткий интервал (ручной /stats) - не показателен
+        val rate = maxOf(ServerLoad.mbit(rx - previous.first, elapsed), ServerLoad.mbit(tx - previous.second, elapsed))
+        val key = "peak:${today()}"
+        if (rate > (store.meta(key)?.toDouble() ?: 0.0)) store.setMeta(key, "%.2f".format(Locale.ROOT, rate))
     }
 
     private fun surveyReport(): String {
@@ -810,6 +980,13 @@ class FriendsBot(
         const val ACTIVE_DAY_BYTES = 2L * 1024 * 1024
         const val MESSAGE_LIMIT = 4000
         const val INVITE_LENGTH = 12
+        const val MAX_LIST = 40
+        /** Рукопожатие не старше этого - человек сейчас онлайн (keepalive каждые 25 с, рукопожатие раз в 2 мин). */
+        val ONLINE_WINDOW: Duration = Duration.ofMinutes(3)
+
+        fun date(epochSeconds: Long?): String = epochSeconds?.let {
+            DateTimeFormatter.ofPattern("dd.MM HH:mm").format(Instant.ofEpochSecond(it).atZone(MOSCOW))
+        } ?: "—"
         val MOSCOW: ZoneId = ZoneId.of("Europe/Moscow")
 
         fun now() = Instant.now().epochSecond
