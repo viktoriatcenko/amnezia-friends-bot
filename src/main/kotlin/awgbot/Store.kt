@@ -35,6 +35,14 @@ data class Friend(
     val publicKey: String?,
     val requestedAt: Long?,
     val lastReminderAt: Long?,
+    val approvedAt: Long? = null,
+    /** Нажал "Установилось". */
+    val installedAt: Long? = null,
+    /** Первое и последнее рукопожатие, которые видел бот (счетчики awg сбрасываются, эти - нет). */
+    val firstSeenAt: Long? = null,
+    val lastSeenAt: Long? = null,
+    /** Пришёл по ссылке-приглашению; без неё бот новичков не пускает. */
+    val invitedAt: Long? = null,
 ) {
     /** Как пользователь показывается админу. */
     val title: String
@@ -64,6 +72,45 @@ class Store(path: String) {
                 )
                 """.trimIndent()
             )
+            // колонки, появившиеся позже: в старой базе их нет
+            val existing = it.executeQuery("pragma table_info(friends)").use { rs ->
+                generateSequence { if (rs.next()) rs.getString("name") else null }.toSet()
+            }
+            for (column in listOf("approved_at", "installed_at", "first_seen_at", "last_seen_at", "invited_at")) {
+                if (column !in existing) it.executeUpdate("alter table friends add column $column integer")
+            }
+            // трафик по дням (по Москве), чтобы видеть, кто пользуется, а кто нет
+            it.executeUpdate(
+                """
+                create table if not exists usage (
+                    friend_id integer not null,
+                    day text not null,
+                    down integer not null,
+                    up integer not null,
+                    primary key (friend_id, day)
+                )
+                """.trimIndent()
+            )
+            // последние увиденные счетчики awg по ключу, чтобы считать приращение
+            it.executeUpdate(
+                "create table if not exists counters (public_key text primary key, down integer not null, up integer not null)"
+            )
+            it.executeUpdate(
+                """
+                create table if not exists survey (
+                    friend_id integer primary key,
+                    step text,
+                    result text,
+                    prev_vpn text,
+                    prev_vpn_name text,
+                    difficulty text,
+                    comment text,
+                    asked_at integer not null,
+                    done_at integer
+                )
+                """.trimIndent()
+            )
+            it.executeUpdate("create table if not exists meta (key text primary key, value text not null)")
         }
     }
 
@@ -113,8 +160,171 @@ class Store(path: String) {
     fun setLastReminder(id: Long, now: Long) = update(id, "last_reminder_at = ?", now)
 
     @Synchronized
-    fun approve(id: Long, ipIndex: Int, privateKey: String, publicKey: String) =
-        update(id, "status = 'APPROVED', ip_index = ?, private_key = ?, public_key = ?", ipIndex, privateKey, publicKey)
+    fun approve(id: Long, ipIndex: Int, privateKey: String, publicKey: String, now: Long) =
+        update(
+            id,
+            "status = 'APPROVED', ip_index = ?, private_key = ?, public_key = ?, approved_at = ?",
+            ipIndex, privateKey, publicKey, now,
+        )
+
+    @Synchronized
+    fun setInvited(id: Long, now: Long) = update(id, "invited_at = coalesce(invited_at, ?)", now)
+
+    @Synchronized
+    fun setInstalled(id: Long, now: Long) = update(id, "installed_at = coalesce(installed_at, ?)", now)
+
+    /** Воронка по всем, кто когда-либо писал боту: заявка -> доступ -> "Установилось" -> подключился. */
+    @Synchronized
+    fun funnel(): Funnel =
+        connection.createStatement().use { st ->
+            st.executeQuery(
+                """
+                select count(*) filter (where status != 'NEW'),
+                       count(*) filter (where approved_at is not null or status = 'APPROVED'),
+                       count(*) filter (where installed_at is not null),
+                       count(*) filter (where first_seen_at is not null)
+                from friends
+                """.trimIndent()
+            ).use { rs ->
+                rs.next()
+                Funnel(rs.getInt(1), rs.getInt(2), rs.getInt(3), rs.getInt(4))
+            }
+        }
+
+    // ---------- Использование ----------
+
+    /**
+     * Запоминает свежие счетчики пира: приращение трафика пишется в день [day], рукопожатие - в first/last_seen.
+     * Если счетчики уменьшились (перезапуск awg1), считаем приращение от нуля.
+     */
+    @Synchronized
+    fun recordPeer(friendId: Long, publicKey: String, stats: PeerStats, day: String) {
+        val previous = connection.prepareStatement("select down, up from counters where public_key = ?").use {
+            it.setString(1, publicKey)
+            it.executeQuery().use { rs -> if (rs.next()) rs.getLong(1) to rs.getLong(2) else null }
+        }
+        fun delta(current: Long, before: Long?) = if (before == null || current < before) current else current - before
+        val down = delta(stats.sent, previous?.first)
+        val up = delta(stats.received, previous?.second)
+        connection.prepareStatement(
+            """
+            insert into counters (public_key, down, up) values (?, ?, ?)
+            on conflict(public_key) do update set down = excluded.down, up = excluded.up
+            """.trimIndent()
+        ).use {
+            it.setString(1, publicKey)
+            it.setLong(2, stats.sent)
+            it.setLong(3, stats.received)
+            it.executeUpdate()
+        }
+        if (down + up > 0) {
+            connection.prepareStatement(
+                """
+                insert into usage (friend_id, day, down, up) values (?, ?, ?, ?)
+                on conflict(friend_id, day) do update set down = down + excluded.down, up = up + excluded.up
+                """.trimIndent()
+            ).use {
+                it.setLong(1, friendId)
+                it.setString(2, day)
+                it.setLong(3, down)
+                it.setLong(4, up)
+                it.executeUpdate()
+            }
+        }
+        if (stats.lastHandshake > 0) {
+            update(
+                friendId,
+                "first_seen_at = coalesce(first_seen_at, ?), last_seen_at = max(coalesce(last_seen_at, 0), ?)",
+                stats.lastHandshake, stats.lastHandshake,
+            )
+        }
+    }
+
+    /** Трафик (вниз + вверх) по каждому пользователю с дня [fromDay] включительно. */
+    @Synchronized
+    fun trafficSince(fromDay: String): Map<Long, Long> =
+        connection.prepareStatement("select friend_id, sum(down + up) from usage where day >= ? group by friend_id").use {
+            it.setString(1, fromDay)
+            it.executeQuery().use { rs -> generateSequence { if (rs.next()) rs.getLong(1) to rs.getLong(2) else null }.toMap() }
+        }
+
+    /** В сколько разных дней с [fromDay] у пользователя набралось хотя бы [minBytes] трафика. */
+    @Synchronized
+    fun activeDaysSince(fromDay: String, minBytes: Long): Map<Long, Int> =
+        connection.prepareStatement(
+            "select friend_id, count(*) from usage where day >= ? and down + up >= ? group by friend_id"
+        ).use {
+            it.setString(1, fromDay)
+            it.setLong(2, minBytes)
+            it.executeQuery().use { rs -> generateSequence { if (rs.next()) rs.getLong(1) to rs.getInt(2) else null }.toMap() }
+        }
+
+    // ---------- Опрос ----------
+
+    /** Начинает опрос заново: старые ответы стираются. */
+    @Synchronized
+    fun startSurvey(friendId: Long, now: Long) {
+        connection.prepareStatement(
+            """
+            insert into survey (friend_id, step, asked_at) values (?, ?, ?)
+            on conflict(friend_id) do update set step = excluded.step, result = null, prev_vpn = null,
+                prev_vpn_name = null, difficulty = null, comment = null, asked_at = excluded.asked_at, done_at = null
+            """.trimIndent()
+        ).use {
+            it.setLong(1, friendId)
+            it.setString(2, SurveyStep.RESULT.name)
+            it.setLong(3, now)
+            it.executeUpdate()
+        }
+    }
+
+    @Synchronized
+    fun survey(friendId: Long): Survey? =
+        connection.prepareStatement("select * from survey where friend_id = ?").use {
+            it.setLong(1, friendId)
+            it.executeQuery().use { rs -> if (rs.next()) rs.toSurvey() else null }
+        }
+
+    @Synchronized
+    fun surveys(): List<Survey> =
+        connection.createStatement().use { st ->
+            st.executeQuery("select * from survey order by asked_at").use { rs ->
+                generateSequence { if (rs.next()) rs.toSurvey() else null }.toList()
+            }
+        }
+
+    /** Записывает ответ в [column] и переводит опрос на шаг [next]; null - опрос закончен. */
+    @Synchronized
+    fun answerSurvey(friendId: Long, column: String, value: String?, next: SurveyStep?, now: Long) {
+        require(column in SURVEY_COLUMNS) { "unknown survey column $column" }
+        connection.prepareStatement("update survey set $column = ?, step = ?, done_at = ? where friend_id = ?").use {
+            it.setString(1, value)
+            it.setString(2, next?.name)
+            it.setObject(3, if (next == null) now else null)
+            it.setLong(4, friendId)
+            it.executeUpdate()
+        }
+    }
+
+    // ---------- Разное ----------
+
+    @Synchronized
+    fun meta(key: String): String? =
+        connection.prepareStatement("select value from meta where key = ?").use {
+            it.setString(1, key)
+            it.executeQuery().use { rs -> if (rs.next()) rs.getString(1) else null }
+        }
+
+    @Synchronized
+    fun setMeta(key: String, value: String) {
+        connection.prepareStatement(
+            "insert into meta (key, value) values (?, ?) on conflict(key) do update set value = excluded.value"
+        ).use {
+            it.setString(1, key)
+            it.setString(2, value)
+            it.executeUpdate()
+        }
+    }
 
     /** Отзывает доступ и освобождает адрес, ключи забываем - при повторном одобрении будут новые. */
     @Synchronized
@@ -148,5 +358,28 @@ class Store(path: String) {
         publicKey = getString("public_key"),
         requestedAt = getLong("requested_at").takeUnless { wasNull() },
         lastReminderAt = getLong("last_reminder_at").takeUnless { wasNull() },
+        approvedAt = getLong("approved_at").takeUnless { wasNull() },
+        installedAt = getLong("installed_at").takeUnless { wasNull() },
+        firstSeenAt = getLong("first_seen_at").takeUnless { wasNull() },
+        lastSeenAt = getLong("last_seen_at").takeUnless { wasNull() },
+        invitedAt = getLong("invited_at").takeUnless { wasNull() },
     )
+
+    private fun ResultSet.toSurvey() = Survey(
+        friendId = getLong("friend_id"),
+        step = getString("step")?.let(SurveyStep::valueOf),
+        result = getString("result")?.let(SurveyResult::valueOf),
+        prevVpn = getString("prev_vpn")?.let(PrevVpn::valueOf),
+        prevVpnName = getString("prev_vpn_name"),
+        difficulty = getString("difficulty")?.let(Difficulty::valueOf),
+        comment = getString("comment"),
+        askedAt = getLong("asked_at"),
+        doneAt = getLong("done_at").takeUnless { wasNull() },
+    )
+
+    private companion object {
+        val SURVEY_COLUMNS = setOf("result", "prev_vpn", "prev_vpn_name", "difficulty", "comment")
+    }
 }
+
+data class Funnel(val requested: Int, val approved: Int, val installed: Int, val connected: Int)

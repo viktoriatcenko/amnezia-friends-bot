@@ -13,6 +13,7 @@ object Guide {
     fun html(): String {
         val sections = listOf(
             "Два режима" to Texts.MODES,
+            "VPN можно не выключать" to Texts.KEEP_IT_ON,
             "iPhone / iPad: установка" to Texts.IOS_INSTALL,
             "iPhone: если приложение недоступно в вашей стране" to Texts.IOS_REGION_STEPS.joinToString("\n\n"),
             "iPhone: добавить конфиг" to Texts.IOS_IMPORT,

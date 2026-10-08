@@ -24,6 +24,7 @@ import java.util.UUID
 
 class TelegramClient(token: String, private val json: Json) {
     private val baseUrl = "https://api.telegram.org/bot$token"
+    private val fileUrl = "https://api.telegram.org/file/bot$token"
     private val http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build()
 
     fun getUpdates(offset: Long, timeoutSeconds: Int): List<Update> {
@@ -88,6 +89,31 @@ class TelegramClient(token: String, private val json: Json) {
 
     fun sendPhoto(chatId: Long, file: InputFile, captionHtml: String? = null, keyboard: Keyboard = emptyList()) {
         sendFile("sendPhoto", "photo", chatId, file, captionHtml, keyboard)
+    }
+
+    /** Username самого бота, для ссылок t.me/<username>?start=... */
+    fun botUsername(): String =
+        requireNotNull(call("getMe", buildJsonObject {}, Duration.ofSeconds(30), User.serializer()).username) { "bot has no username" }
+
+    /** Пересылает сообщение (текст, фото, файл) без шапки "Переслано от", можно со своими кнопками. */
+    fun copyMessage(toChatId: Long, fromChatId: Long, messageId: Long, keyboard: Keyboard = emptyList()) {
+        val body = buildJsonObject {
+            put("chat_id", toChatId)
+            put("from_chat_id", fromChatId)
+            put("message_id", messageId)
+            if (keyboard.isNotEmpty()) put("reply_markup", markup(keyboard))
+        }
+        call("copyMessage", body, Duration.ofSeconds(30), JsonElement.serializer())
+    }
+
+    /** Скачивает присланный боту файл по file_id (до 20 МБ - ограничение Bot API). */
+    fun download(fileId: String): ByteArray {
+        val file = call("getFile", buildJsonObject { put("file_id", fileId) }, Duration.ofSeconds(30), TelegramFile.serializer())
+        val path = requireNotNull(file.filePath) { "Telegram returned no file_path for $fileId" }
+        val request = HttpRequest.newBuilder(URI.create("$fileUrl/$path")).timeout(Duration.ofMinutes(2)).GET().build()
+        val response = http.send(request, HttpResponse.BodyHandlers.ofByteArray())
+        if (response.statusCode() != 200) throw TelegramException("Download of $fileId failed: HTTP ${response.statusCode()}")
+        return response.body()
     }
 
     /** Меню команд по кнопке "/" в личке с ботом. */
@@ -217,6 +243,8 @@ data class Message(
     val from: User? = null,
     val text: String? = null,
     val document: Document? = null,
+    /** Одно и то же фото в нескольких размерах, последнее - самое большое. */
+    val photo: List<PhotoSize>? = null,
 ) {
     /** Команда без @имени_бота, например "/start"; null, если сообщение не команда. */
     val command: String?
@@ -228,7 +256,17 @@ data class Message(
 }
 
 @Serializable
-data class Document(@SerialName("file_id") val fileId: String)
+data class Document(
+    @SerialName("file_id") val fileId: String,
+    @SerialName("file_name") val fileName: String? = null,
+    @SerialName("mime_type") val mimeType: String? = null,
+)
+
+@Serializable
+data class PhotoSize(@SerialName("file_id") val fileId: String)
+
+@Serializable
+data class TelegramFile(@SerialName("file_path") val filePath: String? = null)
 
 @Serializable
 data class Chat(val id: Long, val type: String)

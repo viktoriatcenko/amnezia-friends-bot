@@ -7,6 +7,8 @@ data class Config(
     val databasePath: String,
     /** Куда складывать скачанные APK/MSI, чтобы не тянуть их с GitHub на каждый запрос. */
     val cacheDir: String,
+    /** Куда сохранять скриншоты, которые админ присылает боту (для картинок в инструкции). */
+    val inboxDir: String,
     /** Команда, через которую бот (не root) добавляет и удаляет пиров, см. deploy/awgbot-peer. */
     val peerHelper: List<String>,
     val server: ServerParams,
@@ -24,6 +26,7 @@ data class Config(
                 .toSet(),
             databasePath = optional("DATABASE_PATH", "data/awgbot.db"),
             cacheDir = optional("CACHE_DIR", "data/cache"),
+            inboxDir = optional("INBOX_DIR", "data/inbox"),
             peerHelper = optional("PEER_HELPER", "sudo -n /usr/local/sbin/awgbot-peer").split(" ").filter { it.isNotEmpty() },
             server = ServerParams(
                 endpoint = required("AWG_ENDPOINT"),
