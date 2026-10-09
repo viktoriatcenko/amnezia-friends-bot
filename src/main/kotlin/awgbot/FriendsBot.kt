@@ -314,6 +314,7 @@ class FriendsBot(
             "apk" -> sendApp(chatId, App.ANDROID_APK, Texts.ANDROID_APK, installedKeyboard())
             "installed" -> installed(chatId, store.get(friend.id)!!, screen)
             "invite_me" -> if (friend.status == Status.APPROVED || config.isAdmin(friend.id)) showMyInvite(friend, screen)
+            "donate" -> screen.show(Texts.DONATE, listOf(listOf(Button("💛 Открыть сбор", url = Texts.DONATE_URL)), backRow()))
             "ref_skip" -> {
                 awaitingReferrer.remove(friend.id)
                 screen.show(Texts.REFERRER_THANKS, emptyList())
@@ -499,7 +500,7 @@ class FriendsBot(
             val friend = store.get(before.id) ?: continue
             try {
                 if (before.firstSeenAt == null && friend.firstSeenAt != null) {
-                    telegram.sendMessage(friend.id, "🎉 Вижу, VPN подключился, всё работает!\n\n" + Texts.KEEP_IT_ON, backKeyboard())
+                    telegram.sendMessage(friend.id, "🎉 Вижу, VPN подключился, всё работает!\n\n" + Texts.KEEP_IT_ON + Texts.DONATE_HINT, backKeyboard())
                 }
                 // before, а не friend: чтобы поздравление и опрос не пришли одновременно
                 maybeAskSurvey(before)
@@ -1002,7 +1003,7 @@ $verdict
         listOf(Button("📲 Установить приложение", "devices")),
         listOf(Button("🔀 Режимы работы", "modes"), Button("📘 Инструкция", "guide")),
         listOf(Button("🆘 Не работает", "trouble"), Button("💬 Оставить отзыв", "survey")),
-        listOf(Button("🤝 Пригласить друга", "invite_me")),
+        listOf(Button("🤝 Пригласить друга", "invite_me"), Button("💛 Поддержать сервер", "donate")),
     )
 
     private fun resultKeyboard(): Keyboard = SurveyResult.entries.map { listOf(Button(it.title, "sv:r:${it.name}")) }
