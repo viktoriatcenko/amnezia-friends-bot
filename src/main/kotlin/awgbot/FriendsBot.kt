@@ -222,6 +222,9 @@ class FriendsBot(
         if (awaitingReferrer.remove(friend.id)) {
             val note = text.trim().take(100)
             store.setReferrerNote(friend.id, note)
+            val updated = store.get(friend.id)!!
+            // новичок: имя получено, теперь можно отправлять заявку (в ней админ сразу увидит, от кого)
+            if (updated.status == Status.NEW) return requestAccess(chatId, updated, Screen(chatId, null))
             notifyAdmins("🤝 ${friend.title.escapeHtml()} говорит, что ссылку дал(а): «${note.escapeHtml()}»", emptyList())
             telegram.sendMessage(chatId, Texts.REFERRER_THANKS)
             return
@@ -315,11 +318,9 @@ class FriendsBot(
             "installed" -> installed(chatId, store.get(friend.id)!!, screen)
             "invite_me" -> if (friend.status == Status.APPROVED || config.isAdmin(friend.id)) showMyInvite(friend, screen)
             "donate" -> screen.show(Texts.DONATE, listOf(listOf(Button("💛 Открыть сбор", url = Texts.DONATE_URL)), backRow()))
-            "ref_skip" -> {
-                awaitingReferrer.remove(friend.id)
-                screen.show(Texts.REFERRER_THANKS, emptyList())
-            }
-            "survey" -> if (friend.status == Status.APPROVED) askSurvey(friend.id, Texts.SURVEY_MANUAL, screen) else showHome(chatId, friend, screen)
+            // кнопка «Пропустить» из старых сообщений: пропускать больше нельзя
+            "ref_skip" -> if (needsReferrer(friend)) askReferrer(friend, screen) else showHome(chatId, friend, screen)
+            "survey" -> if (friend.status == Status.APPROVED) openSurvey(friend, screen) else showHome(chatId, friend, screen)
             else -> when {
                 data.startsWith("sv:") -> onSurveyButton(chatId, friend, screen, data)
                 data.startsWith("ios:region:") -> showRegionStep(screen, data.substringAfterLast(':').toInt())
@@ -349,17 +350,22 @@ class FriendsBot(
 
     private fun requestAccess(chatId: Long, friend: Friend, screen: Screen) {
         if (friend.status != Status.NEW) return showHome(chatId, friend, screen)
+        // по общей ссылке не видно, кто её переслал: без имени заявку не отправляем
+        if (needsReferrer(friend)) return askReferrer(friend, screen)
         store.requestAccess(friend.id, now())
         screen.show(Texts.REQUEST_SENT, deviceKeyboard(withBack = false))
         notifyAdmins(
             "🆕 <b>Заявка на доступ</b>\n${friend.title.escapeHtml()}\nid <code>${friend.id}</code>\nПришёл: ${referrerText(friend)}",
             decisionKeyboard(friend.id),
         )
-        // по общей ссылке не видно, кто её переслал: спросим самого человека
-        if (friend.invitedBy == null && !config.isAdmin(friend.id)) {
-            awaitingReferrer.add(friend.id)
-            telegram.sendMessage(friend.id, Texts.ASK_REFERRER, listOf(listOf(Button("Пропустить »", "ref_skip"))))
-        }
+    }
+
+    private fun needsReferrer(friend: Friend) =
+        friend.invitedBy == null && friend.referrerNote.isNullOrBlank() && !config.isAdmin(friend.id)
+
+    private fun askReferrer(friend: Friend, screen: Screen) {
+        awaitingReferrer.add(friend.id)
+        screen.show(Texts.ASK_REFERRER, emptyList())
     }
 
     /** "Где мой конфиг?": успокаиваем и напоминаем админу, но не чаще раза в [REMIND_EVERY]. */
@@ -421,6 +427,26 @@ class FriendsBot(
     private fun askSurvey(friendId: Long, intro: String, screen: Screen? = null) {
         store.startSurvey(friendId, now())
         (screen ?: Screen(friendId, null)).show(intro, resultKeyboard())
+    }
+
+    /** Кнопка «Оставить отзыв»: пройденный опрос заново не начинаем, начатый продолжаем с того же вопроса. */
+    private fun openSurvey(friend: Friend, screen: Screen) {
+        val survey = store.survey(friend.id) ?: return askSurvey(friend.id, Texts.SURVEY_MANUAL, screen)
+        when (survey.step) {
+            null -> if (survey.doneAt != null) {
+                screen.show(Texts.SURVEY_ALREADY, listOf(listOf(Button("🙋 Написать админу", "help_me")), backRow()))
+            } else {
+                askSurvey(friend.id, Texts.SURVEY_MANUAL, screen)
+            }
+            SurveyStep.RESULT -> screen.show(Texts.SURVEY_MANUAL, resultKeyboard())
+            SurveyStep.PREV_VPN -> screen.show(Texts.SURVEY_PREV_VPN, listOf(PrevVpn.entries.map { Button(it.title, "sv:p:${it.name}") }))
+            SurveyStep.PREV_VPN_NAME -> screen.show(
+                "<b>2/4.</b> ${Texts.SURVEY_PREV_VPN_NAME}",
+                listOf(listOf(Button("Пропустить »", "sv:pn:skip"))),
+            )
+            SurveyStep.DIFFICULTY -> screen.show(Texts.SURVEY_DIFFICULTY, difficultyKeyboard())
+            SurveyStep.COMMENT -> screen.show(Texts.SURVEY_COMMENT, listOf(listOf(Button("Пропустить »", "sv:c:skip"))))
+        }
     }
 
     private fun onSurveyButton(chatId: Long, friend: Friend, screen: Screen, data: String) {
@@ -828,7 +854,8 @@ class FriendsBot(
                     listOf(listOf(Button("Да, отключить", "adm:rv:${it.id}"), Button("« Нет", "ap:u:${it.id}"))),
                 )
             }
-            "survey" -> screen.show(surveyReport().take(MESSAGE_LIMIT), back)
+            "survey" -> screen.show(surveyReport().take(MESSAGE_LIMIT), listOf(listOf(Button("📋 Ответы каждого", "ap:svp"))) + back)
+            "svp" -> sendLong(screen.chatId, surveyPeople())
             "server" -> screen.show(serverReport(), listOf(listOf(Button("🔄 Обновить", "ap:server"))) + back)
             "invite" -> screen.show(inviteText(), back)
             "tree" -> screen.show(inviteTree().take(MESSAGE_LIMIT), back)
@@ -988,6 +1015,37 @@ $verdict
                 }
             }
         }
+    }
+
+    /** Опрос по людям: кто что ответил, кто бросил на середине, кто промолчал. */
+    private fun surveyPeople(): String {
+        val surveys = store.surveys()
+        if (surveys.isEmpty()) return "🗳 Опрос пока никому не приходил"
+        fun name(survey: Survey) = store.get(survey.friendId)?.title?.escapeHtml() ?: survey.friendId.toString()
+        val done = surveys.filter { it.doneAt != null }.sortedByDescending { it.doneAt }
+        val started = surveys.filter { it.doneAt == null && it.result != null }
+        val silent = surveys.filter { it.result == null }.sortedBy { it.askedAt }
+        return buildString {
+            appendLine("✅ <b>Ответили (${done.size})</b>")
+            done.forEach { survey ->
+                appendLine()
+                appendLine("<b>${name(survey)}</b>, ${date(survey.doneAt)}")
+                appendLine("Итог: ${survey.result?.title ?: "—"}")
+                appendLine("VPN раньше: ${survey.prevVpn?.title ?: "—"}" + (survey.prevVpnName?.let { " (${it.escapeHtml()})" } ?: ""))
+                appendLine("Инструкция: ${survey.difficulty?.title ?: "—"}")
+                appendLine(survey.comment?.let { "💬 «${it.take(1000).escapeHtml()}»" } ?: "💬 без комментария")
+            }
+            if (started.isNotEmpty()) {
+                appendLine()
+                appendLine("✏️ <b>Бросили на середине (${started.size})</b>")
+                started.forEach { appendLine("• ${name(it)}: итог «${it.result?.title}», спросили ${since(it.askedAt)} назад") }
+            }
+            if (silent.isNotEmpty()) {
+                appendLine()
+                appendLine("🙈 <b>Не ответили (${silent.size})</b>")
+                silent.forEach { appendLine("• ${name(it)}: спросили ${since(it.askedAt)} назад") }
+            }
+        }.trim()
     }
 
     /** Telegram режет сообщения на 4096 символах: длинный отчёт шлём кусками по строкам. */
