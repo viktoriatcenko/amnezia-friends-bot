@@ -34,6 +34,13 @@ class ClientConfigsTest {
     }
 
     @Test
+    fun `blocked config routes server dns through tunnel`() {
+        val text = ClientConfigs(server.copy(dns = "10.9.0.1, fd09:9::1"), listOf("8.8.8.0/24")).build(friend, Mode.BLOCKED)
+        assertTrue("DNS = 10.9.0.1, fd09:9::1" in text)
+        assertTrue("AllowedIPs = 8.8.8.0/24, 10.9.0.1/32, fd09:9::1/128" in text)
+    }
+
+    @Test
     fun `generated keys are 32 bytes`() {
         val (private, public) = Awg(emptyList()).generateKeys()
         assertEquals(32, Base64.getDecoder().decode(private).size)

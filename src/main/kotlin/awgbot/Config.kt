@@ -42,7 +42,9 @@ data class Config(
                     .map { it.substringBefore('=').trim() to it.substringAfter('=').trim() },
                 ipv4Prefix = optional("AWG_IPV4_PREFIX", "10.9.0."),
                 ipv6Prefix = optional("AWG_IPV6_PREFIX", "fd09:9::"),
-                dns = optional("AWG_DNS", "1.1.1.1, 2606:4700:4700::1111"),
+                // dnsmasq на самом сервере: российское резолвит через Яндекс, остальное через Cloudflare.
+                // Не 1.1.1.1 напрямую: к нему телефоны сами включают DoT/DoH, и сайты видят Германию.
+                dns = optional("AWG_DNS", "${optional("AWG_IPV4_PREFIX", "10.9.0.")}1, ${optional("AWG_IPV6_PREFIX", "fd09:9::")}1"),
             ),
         )
 

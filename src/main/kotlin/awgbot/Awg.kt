@@ -72,7 +72,8 @@ class ClientConfigs(private val server: ServerParams, private val blockedRoutes:
         val index = requireNotNull(friend.ipIndex) { "friend ${friend.id} has no address" }
         val allowed = when (mode) {
             Mode.ALL -> "0.0.0.0/0, ::/0"
-            Mode.BLOCKED -> blockedRoutes.joinToString(", ")
+            // адреса DNS тоже через туннель, иначе до DNS на сервере не достучаться
+            Mode.BLOCKED -> (blockedRoutes + dnsRoutes()).distinct().joinToString(", ")
         }
         return buildString {
             appendLine("[Interface]")
@@ -88,6 +89,9 @@ class ClientConfigs(private val server: ServerParams, private val blockedRoutes:
             appendLine("PersistentKeepalive = 25")
         }
     }
+
+    private fun dnsRoutes() = server.dns.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+        .map { if (':' in it) "$it/128" else "$it/32" }
 
     /** Имя файла = имя туннеля в приложении, поэтому коротко и латиницей. */
     fun fileName(mode: Mode) = "friends-${mode.fileSuffix}.conf"
