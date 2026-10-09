@@ -802,7 +802,7 @@ class FriendsBot(
             listOf(button(ListKind.NEVER, "⚪ Не подключались"), button(ListKind.PENDING, "🕐 Заявки")),
             listOf(button(ListKind.ALL, "👥 Все"), Button("🗳 Опрос", "ap:survey")),
             listOf(Button("🖥 Сервер", "ap:server"), Button("🔗 Ссылка", "ap:invite")),
-            listOf(Button("🤝 Кто кого позвал", "ap:tree")),
+            listOf(Button("🤝 Кто кого позвал", "ap:tree"), Button("👀 Как видит новичок", "ap:preview")),
             listOf(Button("🔄 Обновить", "ap:home"), Button("« Меню", "home")),
         ))
     }
@@ -824,6 +824,11 @@ class FriendsBot(
             "server" -> screen.show(serverReport(), listOf(listOf(Button("🔄 Обновить", "ap:server"))) + back)
             "invite" -> screen.show(inviteText(), back)
             "tree" -> screen.show(inviteTree().take(MESSAGE_LIMIT), back)
+            // кнопка "Хочу доступ" тут не настоящая, чтобы админ случайно не сбросил себе статус
+            "preview" -> screen.show(
+                Texts.WELCOME_NEW,
+                listOf(listOf(Button("🔑 Хочу доступ (это превью)", "ap:preview"))) + back,
+            )
         }
     }
 
