@@ -885,7 +885,8 @@ class FriendsBot(
         val online = peer != null && peer.lastHandshake > 0 && now() - peer.lastHandshake < ONLINE_WINDOW.seconds
         val survey = store.survey(friend.id)
         val text = buildString {
-            appendLine("👤 <b>${friend.name.escapeHtml()}</b>" + (friend.username?.let { " @$it" } ?: ""))
+            // ссылка по id открывает профиль, даже если у человека нет @username
+            appendLine("👤 <b><a href=\"tg://user?id=${friend.id}\">${friend.name.escapeHtml()}</a></b>" + (friend.username?.let { " @$it" } ?: ""))
             appendLine("id <code>${friend.id}</code> · ${statusTitle(friend.status)} · ${friend.device?.title ?: "устройство не выбрано"}")
             friend.ipIndex?.let { appendLine("Адрес: ${configs.ipv4(it)}") }
             appendLine()
@@ -908,7 +909,10 @@ class FriendsBot(
             }
         }
         val keyboard = buildList {
-            add(listOf(Button("✉️ Написать", "adm:re:${friend.id}")))
+            add(listOfNotNull(
+                Button("✉️ Написать", "adm:re:${friend.id}"),
+                friend.username?.let { Button("👤 Профиль", url = "https://t.me/$it") },
+            ))
             when (friend.status) {
                 Status.APPROVED -> add(listOf(Button("🔒 Отключить доступ", "ap:rv:${friend.id}")))
                 Status.PENDING -> addAll(decisionKeyboard(friend.id))
