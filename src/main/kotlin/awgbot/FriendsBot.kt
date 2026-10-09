@@ -500,6 +500,8 @@ class FriendsBot(
             val friend = store.get(before.id) ?: continue
             try {
                 if (before.firstSeenAt == null && friend.firstSeenAt != null) {
+                    // подключился - значит, приложение стоит, даже если «Установилось» не нажимал
+                    store.setInstalled(friend.id, friend.firstSeenAt)
                     telegram.sendMessage(friend.id, "🎉 Вижу, VPN подключился, всё работает!\n\n" + Texts.KEEP_IT_ON + Texts.DONATE_HINT, backKeyboard())
                 }
                 // before, а не friend: чтобы поздравление и опрос не пришли одновременно
@@ -757,13 +759,19 @@ class FriendsBot(
         val month = store.trafficSince(daysAgo(29))
 
         fun of(kind: ListKind): List<Friend> = when (kind) {
-            ListKind.ACTIVE -> approved.filter { it.firstSeenAt != null && (activeDays[it.id] ?: 0) > 0 }
+            ListKind.ACTIVE -> approved.filter { it.firstSeenAt != null && !idle(it) }
                 .sortedByDescending { week[it.id] ?: 0 }
-            ListKind.IDLE -> approved.filter { it.firstSeenAt != null && (activeDays[it.id] ?: 0) == 0 }
+            ListKind.IDLE -> approved.filter { it.firstSeenAt != null && idle(it) }
                 .sortedBy { it.lastSeenAt ?: 0 }
             ListKind.NEVER -> approved.filter { it.firstSeenAt == null }
             ListKind.PENDING -> store.list(Status.PENDING)
             ListKind.ALL -> approved.sortedByDescending { it.lastSeenAt ?: 0 }
+        }
+
+        /** Забросил: неделю без активных дней. Подключившийся меньше недели назад ещё не мог забросить. */
+        private fun idle(friend: Friend): Boolean {
+            val newcomer = (friend.firstSeenAt ?: 0) > System.currentTimeMillis() / 1000 - 7 * 24 * 3600
+            return !newcomer && (activeDays[friend.id] ?: 0) == 0
         }
 
         /** Одна строка про пользователя для списков. */
@@ -795,7 +803,7 @@ class FriendsBot(
 📶 Сегодня пользовались: $activeToday, трафик за неделю: ${size(usage.week.values.sum())}
 🖥 Пик нагрузки сегодня: ${"%.0f".format(peak)} из ${config.channelMbit} Мбит/с
 
-<i>«Пользуются» = был трафик хотя бы в один из последних 7 дней.</i>"""
+<i>«Пользуются» = был трафик хотя бы в один из последних 7 дней или подключились меньше недели назад.</i>"""
         fun button(kind: ListKind, label: String) = Button("$label (${counts[kind]})", "ap:l:${kind.code}")
         screen.show(text, listOf(
             listOf(button(ListKind.ACTIVE, "🟢 Пользуются"), button(ListKind.IDLE, "🟡 Забросили")),
