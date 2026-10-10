@@ -23,6 +23,7 @@ object Guide {
             "Windows" to Texts.WINDOWS_INSTALL + "\n\n" + Texts.WINDOWS_IMPORT,
             "Mac" to Texts.MAC_INSTALL + "\n\n" + Texts.MAC_IMPORT,
             "Если что-то не работает" to Texts.TROUBLE,
+            "Приложение ругается на VPN" to Texts.APP_EXCLUDE,
         )
         val toc = sections.mapIndexed { i, (title, _) -> """<li><a href="#s$i">$title</a></li>""" }.joinToString("\n")
         val pictures = mapOf("iPhone: добавить конфиг" to Steps.forImport(Device.IOS))

@@ -285,7 +285,15 @@ class FriendsBot(
             "modes" -> screen.show(Texts.MODES, backKeyboard())
             "trouble" -> screen.show(
                 Texts.TROUBLE,
-                listOf(listOf(Button("🙋 Написать админу", "help_me")), backRow()),
+                listOf(
+                    listOf(Button("📵 Приложение ругается на VPN", "exclude")),
+                    listOf(Button("🙋 Написать админу", "help_me")),
+                    backRow(),
+                ),
+            )
+            "exclude" -> screen.show(
+                Texts.APP_EXCLUDE,
+                listOf(listOf(Button("🙋 Не получилось, написать админу", "help_me")), listOf(Button("« Назад", "trouble"))),
             )
             "help_me" -> askForHelp(friend, screen)
             "guide" -> sendGuide(chatId)
