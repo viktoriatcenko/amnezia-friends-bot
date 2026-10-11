@@ -26,7 +26,10 @@ object Guide {
             "Приложение ругается на VPN" to Texts.APP_EXCLUDE,
         )
         val toc = sections.mapIndexed { i, (title, _) -> """<li><a href="#s$i">$title</a></li>""" }.joinToString("\n")
-        val pictures = mapOf("iPhone: добавить конфиг" to Steps.forImport(Device.IOS))
+        val pictures = mapOf(
+            "iPhone: добавить конфиг" to Steps.forImport(Device.IOS),
+            "Android: добавить конфиг" to Steps.forImport(Device.ANDROID),
+        )
         val body = sections.mapIndexed { i, (title, text) ->
             val images = pictures[title].orEmpty().joinToString("") {
                 """<img src="data:image/jpeg;base64,${Base64.getEncoder().encodeToString(it.bytes)}" alt="">"""
