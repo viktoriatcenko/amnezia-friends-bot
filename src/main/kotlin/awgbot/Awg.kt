@@ -55,11 +55,11 @@ class Awg(private val helper: List<String>) {
 }
 
 /** Режим конфига: что пускать через VPN. */
-enum class Mode(val fileSuffix: String) {
+enum class Mode(val fileName: String) {
     /** Только заблокированное: YouTube, соцсети, Telegram, Cloudflare и т.д. (routes.txt). */
-    BLOCKED("blocked"),
+    BLOCKED("friends.conf"),
     /** Весь трафик. */
-    ALL("all"),
+    ALL("friends-all.conf"),
 }
 
 /** Собирает клиентский .conf для AmneziaWG. */
@@ -93,8 +93,11 @@ class ClientConfigs(private val server: ServerParams, private val blockedRoutes:
     private fun dnsRoutes() = server.dns.split(",").map { it.trim() }.filter { it.isNotEmpty() }
         .map { if (':' in it) "$it/128" else "$it/32" }
 
-    /** Имя файла = имя туннеля в приложении, поэтому коротко и латиницей. */
-    fun fileName(mode: Mode) = "friends-${mode.fileSuffix}.conf"
+    /**
+     * Имя файла = имя туннеля в приложении. Android пускает только [a-zA-Z0-9_=+.-] и до 15 символов,
+     * поэтому коротко: повторно скачанный «friends_1» тоже должен влезать.
+     */
+    fun fileName(mode: Mode) = mode.fileName
 
     companion object {
         fun loadBlockedRoutes(): List<String> =
