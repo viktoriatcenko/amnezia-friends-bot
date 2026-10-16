@@ -5,7 +5,10 @@ import java.util.Base64
 import java.util.concurrent.TimeUnit
 
 /** Статистика пира из `awg show awg1 dump`. */
-data class PeerStats(val lastHandshake: Long, val received: Long, val sent: Long)
+data class PeerStats(val lastHandshake: Long, val received: Long, val sent: Long, val endpoint: String? = null) {
+    /** IP без порта: порт за NAT оператора меняется сам по себе. */
+    val endpointIp: String? get() = endpoint?.substringBeforeLast(':')?.removeSurrounding("[", "]")
+}
 
 /**
  * Работа с интерфейсом awg1. Сам бот не root: пиров добавляет и удаляет скрипт-помощник через sudo,
@@ -39,7 +42,7 @@ class Awg(private val helper: List<String>) {
         run("dump").lines() // строку интерфейса с приватным ключом помощник не отдает
             .map { it.split('\t') }
             .filter { it.size >= 7 }
-            .associate { it[0] to PeerStats(it[4].toLong(), it[5].toLong(), it[6].toLong()) }
+            .associate { it[0] to PeerStats(it[4].toLong(), it[5].toLong(), it[6].toLong(), it[2].takeUnless { e -> e == "(none)" }) }
 
     private fun run(vararg args: String): String {
         val process = ProcessBuilder(helper + args).redirectErrorStream(true).start()
@@ -58,12 +61,16 @@ class Awg(private val helper: List<String>) {
 enum class Mode(val fileName: String) {
     /** Только заблокированное: YouTube, соцсети, Telegram, Cloudflare и т.д. (routes.txt). */
     BLOCKED("friends.conf"),
-    /** Весь трафик. */
+    /** Весь трафик, кроме банков, которым нужен российский адрес (all.txt). */
     ALL("friends-all.conf"),
 }
 
 /** Собирает клиентский .conf для AmneziaWG. */
-class ClientConfigs(private val server: ServerParams, private val blockedRoutes: List<String>) {
+class ClientConfigs(
+    private val server: ServerParams,
+    private val blockedRoutes: List<String>,
+    private val allRoutes: List<String> = listOf("0.0.0.0/0", "::/0"),
+) {
 
     fun ipv4(index: Int) = server.ipv4Prefix + index
     fun ipv6(index: Int) = server.ipv6Prefix + index.toString(16)
@@ -71,7 +78,7 @@ class ClientConfigs(private val server: ServerParams, private val blockedRoutes:
     fun build(friend: Friend, mode: Mode): String {
         val index = requireNotNull(friend.ipIndex) { "friend ${friend.id} has no address" }
         val allowed = when (mode) {
-            Mode.ALL -> "0.0.0.0/0, ::/0"
+            Mode.ALL -> allRoutes.joinToString(", ")
             // адреса DNS тоже через туннель, иначе до DNS на сервере не достучаться
             Mode.BLOCKED -> (blockedRoutes + dnsRoutes()).distinct().joinToString(", ")
         }
@@ -100,8 +107,12 @@ class ClientConfigs(private val server: ServerParams, private val blockedRoutes:
     fun fileName(mode: Mode) = mode.fileName
 
     companion object {
-        fun loadBlockedRoutes(): List<String> =
-            requireNotNull(ClientConfigs::class.java.getResourceAsStream("/routes.txt")) { "routes.txt is missing" }
+        fun loadBlockedRoutes(): List<String> = load("routes.txt")
+
+        fun loadAllRoutes(): List<String> = load("all.txt")
+
+        private fun load(name: String): List<String> =
+            requireNotNull(ClientConfigs::class.java.getResourceAsStream("/$name")) { "$name is missing" }
                 .bufferedReader()
                 .readLines()
                 .map { it.trim() }

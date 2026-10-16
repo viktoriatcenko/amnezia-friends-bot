@@ -59,6 +59,7 @@ class FriendsBot(
         )
         log.info("Bot started, admins: {}", config.adminIds)
         startMonitor()
+        startEndpointWatch()
         var offset = 0L
         while (true) {
             val updates = try {
@@ -523,6 +524,44 @@ class FriendsBot(
         }, 1, MONITOR_EVERY.toMinutes(), TimeUnit.MINUTES)
     }
 
+    /** Последний IP каждого ключа и когда видели каждый недавний IP. Только для потока endpoints. */
+    private val lastIp = mutableMapOf<String, String>()
+    private val recentIps = mutableMapOf<String, MutableMap<String, Long>>()
+
+    /**
+     * Endpoint пира - адрес последнего пакета. С двух устройств на одном ключе он скачет туда-обратно
+     * каждые секунды-минуты, поэтому смотрим часто, а не раз в [MONITOR_EVERY].
+     */
+    private fun startEndpointWatch() {
+        val executor = Executors.newSingleThreadScheduledExecutor { Thread(it, "endpoints").apply { isDaemon = true } }
+        executor.scheduleWithFixedDelay({
+            try {
+                endpointTick()
+            } catch (e: Exception) {
+                log.warn("Endpoint tick failed: {}", e.message)
+            }
+        }, 30, ENDPOINT_EVERY.seconds, TimeUnit.SECONDS)
+    }
+
+    private fun endpointTick() {
+        val stats = awg.stats()
+        val now = now()
+        val day = today()
+        for (friend in store.list(Status.APPROVED)) {
+            val key = friend.publicKey ?: continue
+            val peer = stats[key] ?: continue
+            val ip = peer.endpointIp ?: continue
+            // только живые подключения: после обрыва endpoint остается старым
+            if (now - peer.lastHandshake > ONLINE_WINDOW.seconds) continue
+            val recent = recentIps.getOrPut(key) { mutableMapOf() }
+            recent.values.removeIf { now - it > RETURN_WINDOW.seconds }
+            val previous = lastIp.put(key, ip)
+            val returned = previous != null && previous != ip && ip in recent
+            recent[ip] = now
+            store.recordEndpoint(friend.id, day, ip, now, returned)
+        }
+    }
+
     /** Раз в [MONITOR_EVERY]: пишет трафик по дням, поздравляет с первым подключением, зовёт в опрос, шлёт сводку. */
     @Synchronized
     private fun monitorTick() {
@@ -739,6 +778,11 @@ class FriendsBot(
         sendLong(chatId, "👥 <b>Доступ есть у ${friends.size}</b>\n\n" + lines.joinToString("\n"))
     }
 
+    private fun endpointsText(summary: EndpointSummary): String {
+        val base = "Адресов за неделю: ${summary.ips}, прыжков туда-обратно: ${summary.returns}"
+        return if (summary.shared) "$base\n👥 Похоже, конфиг одновременно на нескольких устройствах (${summary.daysWithReturns} дн)" else base
+    }
+
     private fun lastSeen(friend: Friend, peer: PeerStats?): Long? =
         maxOf(friend.lastSeenAt ?: 0, peer?.lastHandshake ?: 0).takeIf { it > 0 }
 
@@ -791,6 +835,7 @@ class FriendsBot(
         val today = store.trafficSince(today())
         val week = store.trafficSince(daysAgo(6))
         val month = store.trafficSince(daysAgo(29))
+        val endpoints = store.endpointsSince(daysAgo(6))
 
         fun of(kind: ListKind): List<Friend> = when (kind) {
             ListKind.ACTIVE -> approved.filter { it.firstSeenAt != null && !idle(it) }
@@ -817,7 +862,8 @@ class FriendsBot(
                     val installed = if (friend.installedAt != null) "нажал «Установилось»" else "не нажал «Установилось»"
                     "• $name: доступ ${since(friend.approvedAt ?: friend.requestedAt)} назад, ${friend.device?.title ?: "устройство ?"}, $installed"
                 }
-                else -> "• $name: ${activeDays[friend.id] ?: 0} из 7 дн, ${size(week[friend.id] ?: 0)} за неделю, был ${ago(friend.lastSeenAt)}"
+                else -> "• $name: ${activeDays[friend.id] ?: 0} из 7 дн, ${size(week[friend.id] ?: 0)} за неделю, был ${ago(friend.lastSeenAt)}" +
+                    if (endpoints[friend.id]?.shared == true) " 👥" else ""
             }
         }
     }
@@ -935,6 +981,7 @@ class FriendsBot(
             appendLine()
             appendLine("Трафик: сегодня ${size(usage.today[friend.id] ?: 0)} · неделя ${size(usage.week[friend.id] ?: 0)} · 30 дней ${size(usage.month[friend.id] ?: 0)}")
             appendLine("Активных дней за неделю: ${usage.activeDays[friend.id] ?: 0} из 7")
+            usage.endpoints[friend.id]?.let { appendLine(endpointsText(it)) }
             if (survey?.result != null) {
                 appendLine()
                 appendLine("🗳 Опрос: ${survey.result.title}")
@@ -1150,6 +1197,9 @@ $verdict
         const val LAST_IP = 254
         val REMIND_EVERY: Duration = Duration.ofHours(3)
         val MONITOR_EVERY: Duration = Duration.ofMinutes(10)
+        val ENDPOINT_EVERY: Duration = Duration.ofSeconds(15)
+        /** Вернулся на IP, с которого был не дольше этого назад, - значит, тот адрес еще жив. */
+        val RETURN_WINDOW: Duration = Duration.ofMinutes(15)
         /** Через сколько после первого подключения спросить, как дела. */
         val SURVEY_AFTER_CONNECT: Duration = Duration.ofMinutes(30)
         /** Если так и не подключился - через сколько после одобрения спросить, что не так. */

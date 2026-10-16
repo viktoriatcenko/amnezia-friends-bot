@@ -11,7 +11,7 @@ fun main() {
         telegram = TelegramClient(config.telegramToken, json),
         store = Store(config.databasePath),
         awg = Awg(config.peerHelper),
-        configs = ClientConfigs(config.server, ClientConfigs.loadBlockedRoutes()),
+        configs = ClientConfigs(config.server, ClientConfigs.loadBlockedRoutes(), ClientConfigs.loadAllRoutes()),
         apps = Apps(Path.of(config.cacheDir), json),
         config = config,
         load = ServerLoad(config.netIface),

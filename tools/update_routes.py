@@ -1,6 +1,8 @@
-"""Собирает IP-диапазоны того, что пускаем через VPN в режиме «только заблокированное».
+"""Собирает IP-диапазоны для AllowedIPs клиентских конфигов.
 
-Результат - src/main/resources/routes.txt: по сети в строке, IPv4 и IPv6, уже схлопнутые.
+Результат, по сети в строке, IPv4 и IPv6, уже схлопнутые:
+- src/main/resources/routes.txt - что пускаем через VPN в режиме «только заблокированное»;
+- src/main/resources/all.txt - режим «весь трафик»: всё, кроме DIRECT.
 Запускать время от времени (диапазоны у сервисов и реестр блокировок меняются):
     python tools/update_routes.py
 """
@@ -44,6 +46,15 @@ signal.org viber.com proton.me protonmail.com torproject.org
 rutracker.org nnmclub.to rutor.info
 roblox.com www.roblox.com rbxcdn.com
 """.split()
+# Всегда мимо VPN, в обоих режимах: банки с немецким адресом подвисают и требуют перезаходить.
+DIRECT_ASNS = {
+    "Т-Банк": ["AS43399"],
+}
+# CDN Т-Банка на EdgeCenter (картинки, конфиги приложения) - берем по домену, ASN у CDN общий.
+DIRECT_DOMAINS = """
+tbank.ru www.tbank.ru id.tbank.ru secure.tbank.ru tinkoff.ru api.tinkoff.ru
+acdn.tinkoff.ru acdn.tbank.ru imgproxy.cdn-tinkoff.ru brands-prod.cdn-tinkoff.ru
+""".split()
 # DNS ходит через туннель, чтобы провайдер не подменял ответы, а YouTube отдавал ближние к VPS серверы.
 DNS = ["1.1.1.1/32", "1.0.0.1/32", "2606:4700:4700::1111/128", "2606:4700:4700::1001/128"]
 
@@ -74,7 +85,54 @@ def widen(net):
     return net.supernet(new_prefix=limit) if net.prefixlen > limit else net
 
 
+def domain_nets(domains):
+    nets = []
+    for domain in domains:
+        try:
+            ips = resolve(domain)
+        except Exception as e:  # один сломанный домен не должен ронять сборку списка
+            print(f"  {domain}: не резолвится ({e})")
+            continue
+        nets += [ipaddress.ip_network(ip) for ip in ips]
+    return nets
+
+
+def exclude(nets, holes):
+    """Сети [nets] без адресов из [holes]."""
+    result = list(nets)
+    for hole in holes:
+        rest = []
+        for net in result:
+            if net.version != hole.version or not net.overlaps(hole):
+                rest.append(net)
+            elif not hole.subnet_of(net):
+                continue  # сеть целиком внутри дыры
+            else:
+                rest += net.address_exclude(hole)
+        result = rest
+    return result
+
+
+def write(name, nets):
+    v4 = list(ipaddress.collapse_addresses(n for n in nets if n.version == 4))
+    v6 = list(ipaddress.collapse_addresses(n for n in nets if n.version == 6))
+    out = pathlib.Path(__file__).resolve().parent.parent / "src/main/resources" / name
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text("\n".join(str(n) for n in v4 + v6) + "\n", newline="\n")
+    print(f"{name}: {len(v4)} IPv4 + {len(v6)} IPv6 -> {out}")
+
+
 def main():
+    direct = []
+    for name, asns in DIRECT_ASNS.items():
+        found = [p for asn in asns for p in asn_prefixes(asn)]
+        direct += [ipaddress.ip_network(p, strict=False) for p in found]
+        print(f"мимо VPN, {name}: {len(found)} сетей")
+    direct += [widen(n) for n in domain_nets(DIRECT_DOMAINS)]
+    direct = list(ipaddress.collapse_addresses(n for n in direct if n.version == 4)) + \
+        list(ipaddress.collapse_addresses(n for n in direct if n.version == 6))
+    print("мимо VPN:", ", ".join(map(str, direct)))
+
     nets = [ipaddress.ip_network(n) for n in DNS]
     for name, asns in ASNS.items():
         found = [p for asn in asns for p in asn_prefixes(asn)]
@@ -86,21 +144,11 @@ def main():
         lines = [l.strip() for l in fetch(url).splitlines() if l.strip() and not l.startswith("#")]
         nets += [ipaddress.ip_network(l, strict=False) for l in lines]
         print(f"{name}: {len(lines)} сетей")
-    for domain in DOMAINS:
-        try:
-            ips = resolve(domain)
-        except Exception as e:  # один сломанный домен не должен ронять сборку списка
-            print(f"  {domain}: не резолвится ({e})")
-            continue
-        nets += [ipaddress.ip_network(ip) for ip in ips]
+    nets += domain_nets(DOMAINS)
 
     nets = [widen(n) for n in nets]
-    v4 = list(ipaddress.collapse_addresses(n for n in nets if n.version == 4))
-    v6 = list(ipaddress.collapse_addresses(n for n in nets if n.version == 6))
-    out = pathlib.Path(__file__).resolve().parent.parent / "src/main/resources/routes.txt"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text("\n".join(str(n) for n in v4 + v6) + "\n", newline="\n")
-    print(f"Итого: {len(v4)} IPv4 + {len(v6)} IPv6 -> {out}")
+    write("routes.txt", exclude(nets, direct))
+    write("all.txt", exclude([ipaddress.ip_network("0.0.0.0/0"), ipaddress.ip_network("::/0")], direct))
 
 
 if __name__ == "__main__":

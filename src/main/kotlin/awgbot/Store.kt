@@ -96,6 +96,21 @@ class Store(path: String) {
                 )
                 """.trimIndent()
             )
+            // с каких IP подключался конфиг: returns - сколько раз вернулся на этот IP с другого,
+            // пока старый был жив. Частые возвраты = конфиг одновременно на нескольких устройствах.
+            it.executeUpdate(
+                """
+                create table if not exists endpoints (
+                    friend_id integer not null,
+                    day text not null,
+                    ip text not null,
+                    first_at integer not null,
+                    last_at integer not null,
+                    returns integer not null default 0,
+                    primary key (friend_id, day, ip)
+                )
+                """.trimIndent()
+            )
             // последние увиденные счетчики awg по ключу, чтобы считать приращение
             it.executeUpdate(
                 "create table if not exists counters (public_key text primary key, down integer not null, up integer not null)"
@@ -253,6 +268,40 @@ class Store(path: String) {
         }
     }
 
+    /** Отмечает, что конфиг [friendId] сейчас подключен с [ip]; [returned] - вернулся на него с другого адреса. */
+    @Synchronized
+    fun recordEndpoint(friendId: Long, day: String, ip: String, at: Long, returned: Boolean) {
+        connection.prepareStatement(
+            """
+            insert into endpoints (friend_id, day, ip, first_at, last_at, returns) values (?, ?, ?, ?, ?, ?)
+            on conflict(friend_id, day, ip) do update set last_at = excluded.last_at, returns = returns + excluded.returns
+            """.trimIndent()
+        ).use {
+            it.setLong(1, friendId)
+            it.setString(2, day)
+            it.setString(3, ip)
+            it.setLong(4, at)
+            it.setLong(5, at)
+            it.setInt(6, if (returned) 1 else 0)
+            it.executeUpdate()
+        }
+    }
+
+    /** По каждому пользователю с дня [fromDay]: (разных IP, возвратов, дней с возвратами). */
+    @Synchronized
+    fun endpointsSince(fromDay: String): Map<Long, EndpointSummary> =
+        connection.prepareStatement(
+            """
+            select friend_id, count(distinct ip), sum(returns), count(distinct case when returns > 0 then day end)
+            from endpoints where day >= ? group by friend_id
+            """.trimIndent()
+        ).use {
+            it.setString(1, fromDay)
+            it.executeQuery().use { rs ->
+                buildMap { while (rs.next()) put(rs.getLong(1), EndpointSummary(rs.getInt(2), rs.getInt(3), rs.getInt(4))) }
+            }
+        }
+
     /** Трафик (вниз + вверх) по каждому пользователю с дня [fromDay] включительно. */
     @Synchronized
     fun trafficSince(fromDay: String): Map<Long, Long> =
@@ -398,3 +447,13 @@ class Store(path: String) {
 }
 
 data class Funnel(val requested: Int, val approved: Int, val installed: Int, val connected: Int)
+
+/** С каких адресов подключался конфиг: [returns] - возвраты на недавний IP, признак нескольких устройств. */
+data class EndpointSummary(val ips: Int, val returns: Int, val daysWithReturns: Int) {
+    val shared: Boolean get() = returns >= SHARED_RETURNS
+
+    companion object {
+        /** Телефон, гуляющий между Wi-Fi и мобильной сетью, дает единицы возвратов, два устройства - десятки. */
+        const val SHARED_RETURNS = 6
+    }
+}

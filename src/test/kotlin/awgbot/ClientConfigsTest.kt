@@ -25,6 +25,17 @@ class ClientConfigsTest {
     }
 
     @Test
+    fun `full config skips t-bank`() {
+        val routes = ClientConfigs.loadAllRoutes()
+        val text = ClientConfigs(server, emptyList(), routes).build(friend, Mode.ALL)
+        assertTrue("AllowedIPs = ${routes.joinToString(", ")}" in text)
+        assertTrue("::/0" in routes)
+        assertTrue("0.0.0.0/2" in routes)
+        assertTrue("178.130.128.0/23" !in routes, "Т-Банк должен идти мимо VPN")
+        assertTrue(ClientConfigs.loadBlockedRoutes().none { it.startsWith("178.130.128.") })
+    }
+
+    @Test
     fun `blocked config uses bundled routes`() {
         val routes = ClientConfigs.loadBlockedRoutes()
         assertTrue(routes.size > 100)
